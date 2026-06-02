@@ -1,0 +1,19 @@
+# venv
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Data / large files
+*.raw
+*.npy
+data/
