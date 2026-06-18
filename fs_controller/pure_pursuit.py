@@ -13,9 +13,9 @@ except ImportError:
 @dataclass(frozen=True)
 class PurePursuitConfig:
     wheelbase_m: float = 2.0
-    min_lookahead_m: float = 1.0
-    lookahead_gain_s: float = 0.35
-    max_lookahead_m: float = 15.0
+    min_lookahead_m: float = 2.5
+    lookahead_gain_s: float = 0.18
+    max_lookahead_m: float = 10.0
     max_steer_rad: float = 0.3
     default_target_speed_mps: float = 6.0
     finish_tolerance_m: float = 1.0

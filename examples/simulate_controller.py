@@ -9,10 +9,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fs_controller import (
     ControllerStack,
     ControllerStackConfig,
+    MAX_SPEED_30_KMH_MPS,
     PIConfig,
     PathPoint,
+    PowertrainConfig,
+    PowertrainModel,
     PurePursuitConfig,
     VehicleState,
+    apply_friction_circle,
+    requested_acceleration_from_actuators,
 )
 
 
@@ -53,14 +58,31 @@ def main() -> None:
 
     path = make_track()
     state = VehicleState(x=0.0, y=-1.0, yaw=0.0, speed=0.0)
+    powertrain = PowertrainModel()
+    vehicle_config = PowertrainConfig()
     dt = 0.02
 
     for step in range(900):
         command = controller.update(state, path, dt)
 
-        accel = 3.0 * command.throttle - 5.0 * command.brake - 0.08 * state.speed
-        speed = max(0.0, state.speed + accel * dt)
-        yaw_rate = speed / wheelbase * tan(command.steering_rad)
+        requested_accel = requested_acceleration_from_actuators(
+            command.throttle,
+            command.brake,
+            throttle_accel_mps2=3.0,
+            brake_decel_mps2=5.0,
+        )
+        powertrain_accel = powertrain.actual_acceleration(state.speed, requested_accel)
+        speed_before_lateral = max(0.0, state.speed + powertrain_accel * dt)
+        commanded_lateral_accel = speed_before_lateral * speed_before_lateral * tan(command.steering_rad) / wheelbase
+        actual_long_force, actual_lateral_force, _ = apply_friction_circle(
+            vehicle_config.mass_kg * powertrain_accel,
+            vehicle_config.mass_kg * commanded_lateral_accel,
+            vehicle_config.mass_kg,
+        )
+        actual_accel = actual_long_force / vehicle_config.mass_kg
+        achievable_lateral_accel = actual_lateral_force / vehicle_config.mass_kg
+        speed = min(MAX_SPEED_30_KMH_MPS, max(0.0, state.speed + actual_accel * dt))
+        yaw_rate = achievable_lateral_accel / max(speed, 1e-3)
         yaw = state.yaw + yaw_rate * dt
         x = state.x + speed * cos(yaw) * dt
         y = state.y + speed * sin(yaw) * dt
