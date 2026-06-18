@@ -23,6 +23,7 @@ from fs_controller import (
     apply_friction_circle,
     requested_acceleration_from_actuators,
 )
+from fs_controller.raceline import Raceline, load_raceline, wrap_angle
 
 
 @dataclass
@@ -34,7 +35,7 @@ class VehicleState:
 
 
 class ConeTrackAnimation:
-    def __init__(self, track: TrackDefinition) -> None:
+    def __init__(self, track: TrackDefinition, raceline_path: Path | None = None) -> None:
         self.root = tk.Tk()
         self.root.title("Formula Student Pure Pursuit Animation")
         self.root.geometry("1260x800")
@@ -43,7 +44,7 @@ class ConeTrackAnimation:
         self.track = track
         self.wheelbase_m = 1.55
         self.car_length_m = 2.8
-        self.car_width_m = 1.5
+        self.car_width_m = 1.1
         self.track_width_m = track.track_width_m
         self.cone_spacing_m = track.cone_spacing_m
         self.min_lookahead_m = 3.0
@@ -52,6 +53,19 @@ class ConeTrackAnimation:
         self.dt_s = 0.02
         self.powertrain = PowertrainModel()
         self.vehicle_config = PowertrainConfig()
+        self.raceline: Raceline | None = load_raceline(raceline_path) if raceline_path is not None else None
+        self.raceline_points = (
+            [TrackPoint(float(x), float(y)) for x, y in zip(self.raceline.x_m, self.raceline.y_m)]
+            if self.raceline is not None
+            else []
+        )
+        self.safe_braking_accel_mps2 = 8.0
+        self.safe_throttle_accel_mps2 = 5.0
+        self.raceline_speed_kp = 2.0
+        self.raceline_speed_ki = 0.5
+        self.raceline_integral_limit_mps2 = 5.0
+        self.max_jerk_throttle_mps3 = 8.0
+        self.max_jerk_brake_mps3 = 20.0
 
         self.path = track.build_centerline()
         self.left_cones, self.right_cones = track.build_cones()
@@ -64,6 +78,7 @@ class ConeTrackAnimation:
         self.view_center_y = self.path[0].y
         self._drag_start: tuple[float, float, float, float] | None = None
         self.trajectory: list[TrackPoint] = []
+        self.target_marker = self.path[0]
 
         self._build_ui()
         self.reset()
@@ -78,7 +93,7 @@ class ConeTrackAnimation:
 
         title = tk.Label(
             toolbar,
-            text=f"{self.track.name} Pure Pursuit",
+            text=f"{self.track.name} {'Raceline' if self.raceline is not None else 'Pure Pursuit'}",
             bg="#151a1f",
             fg="#f3f5f4",
             font=("Arial", 18, "bold"),
@@ -195,7 +210,14 @@ class ConeTrackAnimation:
 
         legend = tk.Label(
             panel,
-            text="Orange cones: left boundary\nBlue cones: right boundary\nRed line: driven trajectory\nGreen dot: pure pursuit target\nWhite body: 1.5 m wide car",
+            text=(
+                "Orange cones: left boundary\n"
+                "Blue cones: right boundary\n"
+                "Red line: planned raceline\n"
+                "Pink line: driven trajectory\n"
+                "Green dot: pure pursuit target\n"
+                "White body: 1.1 m wide car"
+            ),
             justify="left",
             bg="#151a1f",
             fg="#c7d0d6",
@@ -204,13 +226,69 @@ class ConeTrackAnimation:
         legend.pack(anchor="w")
 
     def reset(self) -> None:
-        first = self.path[0]
-        self.state = VehicleState(first.x - 1.2, first.y - 0.15, first.yaw, 0.0)
-        self.last_target_index = 0
+        if self.raceline is None:
+            first = self.path[0]
+            self.state = VehicleState(first.x, first.y, first.yaw, 0.5)
+        else:
+            start_index, start_yaw = self._prepare_raceline_start()
+            self.state = VehicleState(
+                float(self.raceline.x_m[start_index]),
+                float(self.raceline.y_m[start_index]),
+                start_yaw,
+                0.5,
+            )
+            self.last_target_index = start_index
+        if self.raceline is None:
+            self.last_target_index = 0
         self.integrator = 0.0
+        self.previous_accel_cmd_mps2 = 0.0
         self.sim_time_s = 0.0
         self.trajectory = [TrackPoint(self.state.x, self.state.y, self.state.yaw, self.state.speed)]
+        self.target_marker = self.path[0]
         self.follow_vehicle()
+
+    def _prepare_raceline_start(self) -> tuple[int, float]:
+        if self.raceline is None:
+            return 0, self.path[0].yaw
+
+        start_index = self.raceline.closest_index_to(0.0, 0.0)
+        start_dist = math.hypot(float(self.raceline.x_m[start_index]), float(self.raceline.y_m[start_index]))
+        if start_dist > 2.0:
+            raise ValueError(
+                f"No raceline point near origin (closest is {start_dist:.2f} m at index {start_index})."
+            )
+
+        yaw = float(self.raceline.psi_rad[start_index])
+        yaw_deg = self._normalize_degrees(math.degrees(yaw))
+        if abs(yaw_deg) > 90.0:
+            geometric_yaw = self.raceline.geometric_heading_at(start_index)
+            psi_error = wrap_angle(yaw - geometric_yaw)
+            if abs(abs(math.degrees(psi_error)) - 90.0) < 15.0:
+                self.raceline.rotate_psi(-psi_error)
+            else:
+                self.raceline.reverse_direction()
+
+            start_index = self.raceline.closest_index_to(0.0, 0.0)
+            yaw = float(self.raceline.psi_rad[start_index])
+            yaw_deg = self._normalize_degrees(math.degrees(yaw))
+            if abs(yaw_deg) > 90.0:
+                raise ValueError(
+                    f"Raceline at start points {yaw_deg:.1f} degrees from +x axis. "
+                    "Expected near 0 degrees."
+                )
+
+        print(f"Start index in raceline: {start_index}")
+        print(f"Start position: ({self.raceline.x_m[start_index]:.3f}, {self.raceline.y_m[start_index]:.3f})")
+        print(f"Start yaw: {yaw:.3f} rad ({yaw_deg:.1f} degrees)")
+        return start_index, yaw
+
+    @staticmethod
+    def _normalize_degrees(angle_deg: float) -> float:
+        while angle_deg > 180.0:
+            angle_deg -= 360.0
+        while angle_deg <= -180.0:
+            angle_deg += 360.0
+        return angle_deg
 
     def toggle(self) -> None:
         self.running = not self.running
@@ -246,10 +324,13 @@ class ConeTrackAnimation:
         self.root.after(16, self._tick)
 
     def _update_vehicle(self, dt_s: float) -> None:
-        high = self._pure_pursuit()
-        low = self._speed_pi(high["target_speed"], dt_s)
-
-        requested_accel = requested_acceleration_from_actuators(low["throttle"], low["brake"])
+        high = self._raceline_pure_pursuit() if self.raceline is not None else self._pure_pursuit()
+        if self.raceline is not None:
+            low = self._speed_feedforward_pi(high["target_speed"], high["target_accel"], dt_s)
+            requested_accel = low["requested_accel"]
+        else:
+            low = self._speed_pi(high["target_speed"], dt_s)
+            requested_accel = requested_acceleration_from_actuators(low["throttle"], low["brake"])
         powertrain_accel = self.powertrain.actual_acceleration(self.state.speed, requested_accel)
         speed_before_lateral = max(0.0, self.state.speed + powertrain_accel * dt_s)
         commanded_lateral_accel = (
@@ -262,7 +343,9 @@ class ConeTrackAnimation:
         )
         actual_accel = actual_long_force / self.vehicle_config.mass_kg
         achievable_lateral_accel = actual_lateral_force / self.vehicle_config.mass_kg
-        self.state.speed = min(MAX_SPEED_30_KMH_MPS, max(0.0, self.state.speed + actual_accel * dt_s))
+        self.state.speed = max(0.0, self.state.speed + actual_accel * dt_s)
+        if self.raceline is None:
+            self.state.speed = min(MAX_SPEED_30_KMH_MPS, self.state.speed)
         yaw_rate = achievable_lateral_accel / max(self.state.speed, 1e-3)
         self.state.yaw += yaw_rate * dt_s
         self.state.x += self.state.speed * math.cos(self.state.yaw) * dt_s
@@ -297,6 +380,7 @@ class ConeTrackAnimation:
 
         self.last_target_index = target_index
         target = self.path[target_index]
+        self.target_marker = target
         dx = target.x - self.state.x
         dy = target.y - self.state.y
         local_x = math.cos(self.state.yaw) * dx + math.sin(self.state.yaw) * dy
@@ -312,9 +396,64 @@ class ConeTrackAnimation:
         return {
             "steering": steering,
             "target_speed": target.speed,
+            "target_accel": 0.0,
             "target_index": target_index,
             "lookahead": lookahead,
         }
+
+    def _raceline_pure_pursuit(self) -> dict[str, float]:
+        if self.raceline is None:
+            return self._pure_pursuit()
+
+        nearest = self.raceline.nearest_index(self.state.x, self.state.y)
+        s_now = float(self.raceline.s_m[nearest])
+        lookahead, _, _, _ = self._compute_raceline_lookahead(self.state.speed, s_now)
+        target = self.raceline.target_at_s(s_now + lookahead)
+        brake_distance = max(3.0, self.state.speed * self.state.speed / (2.0 * 8.0))
+        speed_target = self.raceline.target_at_s(s_now + brake_distance)
+        self.last_target_index = target.index
+        self.target_marker = TrackPoint(target.x_m, target.y_m)
+
+        dx = target.x_m - self.state.x
+        dy = target.y_m - self.state.y
+        local_x = math.cos(self.state.yaw) * dx + math.sin(self.state.yaw) * dy
+        local_y = -math.sin(self.state.yaw) * dx + math.cos(self.state.yaw) * dy
+        distance_sq = max(local_x * local_x + local_y * local_y, 1e-6)
+        curvature = 0.0 if local_x <= 0.0 else 2.0 * local_y / distance_sq
+        steering = self._clamp(
+            math.atan(self.wheelbase_m * curvature),
+            -self.max_steer_rad,
+            self.max_steer_rad,
+        )
+
+        return {
+            "steering": steering,
+            "target_speed": speed_target.v_target_mps,
+            "target_accel": speed_target.a_target_mps2,
+            "target_index": target.index,
+            "lookahead": lookahead,
+        }
+
+    def _compute_raceline_lookahead(
+        self,
+        v_actual: float,
+        s_now: float,
+        horizon: float = 10.0,
+    ) -> tuple[float, float, float, float]:
+        if self.raceline is None:
+            lookahead = self._clamp(v_actual * 0.45, 2.0, 6.0)
+            return lookahead, lookahead, lookahead, 0.0
+
+        sample_count = 20
+        s_samples = [
+            (s_now + horizon * i / (sample_count - 1)) % self.raceline.total_s
+            for i in range(sample_count)
+        ]
+        kappa_max = max(abs(self.raceline.kappa_at(s)) for s in s_samples)
+        lookahead_speed = v_actual * 0.45
+        lookahead_curv = 1.0 / max(kappa_max, 1e-3)
+        lookahead = self._clamp(min(lookahead_speed, lookahead_curv), 2.0, 6.0)
+        return lookahead, lookahead_speed, lookahead_curv, kappa_max
 
     def _speed_pi(self, target_speed: float, dt_s: float) -> dict[str, float]:
         error = target_speed - self.state.speed
@@ -323,6 +462,24 @@ class ConeTrackAnimation:
         return {
             "throttle": self._clamp(command, 0.0, 1.0),
             "brake": self._clamp(-1.3 * command, 0.0, 1.0),
+        }
+
+    def _speed_feedforward_pi(self, target_speed: float, target_accel: float, dt_s: float) -> dict[str, float]:
+        error = target_speed - self.state.speed
+        self.integrator = self._clamp(
+            self.integrator + self.raceline_speed_ki * error * dt_s,
+            -self.raceline_integral_limit_mps2,
+            self.raceline_integral_limit_mps2,
+        )
+        raw_accel = target_accel + self.raceline_speed_kp * error + self.integrator
+        lower = self.previous_accel_cmd_mps2 - self.max_jerk_brake_mps3 * dt_s
+        upper = self.previous_accel_cmd_mps2 + self.max_jerk_throttle_mps3 * dt_s
+        accel_cmd = self._clamp(raw_accel, lower, upper)
+        self.previous_accel_cmd_mps2 = accel_cmd
+        return {
+            "throttle": self._clamp(accel_cmd / self.safe_throttle_accel_mps2, 0.0, 1.0),
+            "brake": self._clamp(-accel_cmd / self.safe_braking_accel_mps2, 0.0, 1.0),
+            "requested_accel": accel_cmd,
         }
 
     def _nearest_index(self) -> int:
@@ -356,6 +513,8 @@ class ConeTrackAnimation:
 
         self._draw_grid(width, height, camera_x, camera_y, scale)
         self._draw_polyline(self.path, screen, "#6d7a71", 2, True)
+        if self.raceline_points:
+            self._draw_polyline(self.raceline_points, screen, "#f04444", 2, True)
         self._draw_polyline(self.left_cones, screen, "#6b4b28", 2, True)
         self._draw_polyline(self.right_cones, screen, "#254e70", 2, True)
         self._draw_polyline(self.trajectory, screen, "#e35d5b", 3, False)
@@ -437,8 +596,7 @@ class ConeTrackAnimation:
             )
 
     def _draw_target(self, screen, scale: float) -> None:
-        high = self._pure_pursuit()
-        target = self.path[int(high["target_index"])]
+        target = self.target_marker
         car_x, car_y = screen(self.state)
         target_x, target_y = screen(target)
         radius = max(6.0, 0.25 * scale)
@@ -518,7 +676,7 @@ class ConeTrackAnimation:
             self.trajectory = self.trajectory[-6000:]
 
     def _track_bounds(self) -> tuple[float, float, float, float]:
-        points = [*self.path, *self.left_cones, *self.right_cones]
+        points = [*self.path, *self.raceline_points, *self.left_cones, *self.right_cones]
         return (
             min(point.x for point in points),
             max(point.x for point in points),
@@ -538,8 +696,9 @@ class ConeTrackAnimation:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the cone track pure pursuit animation.")
     parser.add_argument("--track", default="autocross", help="Track name: autocross or hockenheim_fsg")
+    parser.add_argument("--raceline", type=Path, help="Optional optimizer trajectory CSV to animate")
     args = parser.parse_args()
-    ConeTrackAnimation(get_track(args.track)).run()
+    ConeTrackAnimation(get_track(args.track), args.raceline).run()
 
 
 if __name__ == "__main__":
