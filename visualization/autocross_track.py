@@ -3,6 +3,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+try:
+    from fs_controller import MAX_SPEED_30_KMH_MPS, TireAwareSpeedPlannerConfig, tire_aware_centerline_speeds
+except ModuleNotFoundError:
+    MAX_SPEED_30_KMH_MPS = 30.0 / 3.6
+    TireAwareSpeedPlannerConfig = None
+    tire_aware_centerline_speeds = None
+
 
 @dataclass
 class TrackPoint:
@@ -160,22 +167,20 @@ def _assign_yaw(points: list[TrackPoint]) -> None:
 
 
 def _assign_curvature_speed(points: list[TrackPoint]) -> None:
-    mu = 1.25
-    g = 9.81
-    safety_factor = 0.72
-    straight_speed_limit_mps = 25.0  # 90 km/h
-    minimum_corner_speed_mps = 7.5  # 27 km/h
-
-    raw_speeds: list[float] = []
-    for i, point in enumerate(points):
-        prev = points[max(0, i - 6)]
-        nxt = points[min(len(points) - 1, i + 6)]
-        curvature = _curvature(prev, point, nxt)
-        if curvature < 1e-4:
-            speed = straight_speed_limit_mps
-        else:
-            speed = safety_factor * math.sqrt(mu * g / curvature)
-        raw_speeds.append(max(minimum_corner_speed_mps, min(straight_speed_limit_mps, speed)))
+    if tire_aware_centerline_speeds is None or TireAwareSpeedPlannerConfig is None:
+        raw_speeds = [12.0 for _ in points]
+    else:
+        raw_speeds = tire_aware_centerline_speeds(
+            points,
+            TireAwareSpeedPlannerConfig(
+                mass_kg=320.0,
+                safety_factor=0.75,
+                max_speed_mps=MAX_SPEED_30_KMH_MPS,
+                min_speed_mps=3.0,
+                curvature_sample_offset=6,
+            ),
+            closed=True,
+        )
 
     smoothed = raw_speeds[:]
     for _ in range(3):
