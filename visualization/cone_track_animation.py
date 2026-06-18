@@ -2,9 +2,27 @@ from __future__ import annotations
 
 import math
 import tkinter as tk
+import argparse
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
-from autocross_track import TrackPoint, build_cone_boundaries, build_fsd_autocross_track
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+try:
+    from track_registry import TrackDefinition, get_track
+    from autocross_track import TrackPoint
+except ModuleNotFoundError:
+    from visualization.track_registry import TrackDefinition, get_track
+    from visualization.autocross_track import TrackPoint
+
+from fs_controller import (
+    MAX_SPEED_30_KMH_MPS,
+    PowertrainConfig,
+    PowertrainModel,
+    apply_friction_circle,
+    requested_acceleration_from_actuators,
+)
 
 
 @dataclass
@@ -16,28 +34,36 @@ class VehicleState:
 
 
 class ConeTrackAnimation:
-    def __init__(self) -> None:
+    def __init__(self, track: TrackDefinition) -> None:
         self.root = tk.Tk()
         self.root.title("Formula Student Pure Pursuit Animation")
         self.root.geometry("1260x800")
         self.root.minsize(980, 650)
 
+        self.track = track
         self.wheelbase_m = 1.55
         self.car_length_m = 2.8
         self.car_width_m = 1.5
-        self.track_width_m = 3.0
-        self.cone_spacing_m = 2.5
+        self.track_width_m = track.track_width_m
+        self.cone_spacing_m = track.cone_spacing_m
         self.min_lookahead_m = 3.0
         self.max_lookahead_m = 18.0
         self.max_steer_rad = 0.5
         self.dt_s = 0.02
-        self.max_graph_samples = 420
+        self.powertrain = PowertrainModel()
+        self.vehicle_config = PowertrainConfig()
 
-        self.path = self._build_track()
-        self.left_cones, self.right_cones = self._build_cones()
+        self.path = track.build_centerline()
+        self.left_cones, self.right_cones = track.build_cones()
         self.running = True
         self.speed_scale = tk.DoubleVar(value=1.0)
         self.lookahead_gain = tk.DoubleVar(value=0.2)
+        self.zoom = tk.DoubleVar(value=1.0)
+        self.follow_car = tk.BooleanVar(value=True)
+        self.view_center_x = self.path[0].x
+        self.view_center_y = self.path[0].y
+        self._drag_start: tuple[float, float, float, float] | None = None
+        self.trajectory: list[TrackPoint] = []
 
         self._build_ui()
         self.reset()
@@ -52,7 +78,7 @@ class ConeTrackAnimation:
 
         title = tk.Label(
             toolbar,
-            text="FSD Autocross Pure Pursuit",
+            text=f"{self.track.name} Pure Pursuit",
             bg="#151a1f",
             fg="#f3f5f4",
             font=("Arial", 18, "bold"),
@@ -64,6 +90,12 @@ class ConeTrackAnimation:
 
         reset_button = tk.Button(toolbar, text="Reset", width=8, command=self.reset)
         reset_button.pack(side="left", padx=4)
+
+        follow_button = tk.Button(toolbar, text="Follow", width=8, command=self.follow_vehicle)
+        follow_button.pack(side="left", padx=4)
+
+        fit_button = tk.Button(toolbar, text="Fit", width=8, command=self.fit_track)
+        fit_button.pack(side="left", padx=4)
 
         tk.Label(toolbar, text="Speed", bg="#151a1f", fg="#c7d0d6").pack(
             side="left", padx=(22, 6)
@@ -99,6 +131,23 @@ class ConeTrackAnimation:
             highlightthickness=0,
         ).pack(side="left")
 
+        tk.Label(toolbar, text="Zoom", bg="#151a1f", fg="#c7d0d6").pack(
+            side="left", padx=(22, 6)
+        )
+        tk.Scale(
+            toolbar,
+            from_=0.2,
+            to=4.0,
+            resolution=0.05,
+            orient="horizontal",
+            variable=self.zoom,
+            length=130,
+            showvalue=False,
+            bg="#151a1f",
+            fg="#f3f5f4",
+            highlightthickness=0,
+        ).pack(side="left")
+
         content = tk.Frame(self.root, bg="#101316")
         content.grid(row=1, column=0, sticky="nsew")
         content.columnconfigure(0, weight=1)
@@ -106,6 +155,11 @@ class ConeTrackAnimation:
 
         self.canvas = tk.Canvas(content, bg="#1f261f", highlightthickness=0)
         self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.canvas.bind("<ButtonPress-1>", self._begin_pan)
+        self.canvas.bind("<B1-Motion>", self._pan)
+        self.canvas.bind("<MouseWheel>", self._zoom_with_wheel)
+        self.canvas.bind("<Button-4>", self._zoom_with_wheel)
+        self.canvas.bind("<Button-5>", self._zoom_with_wheel)
 
         panel = tk.Frame(content, width=280, bg="#151a1f", padx=16, pady=14)
         panel.grid(row=0, column=1, sticky="ns")
@@ -118,9 +172,12 @@ class ConeTrackAnimation:
             ("Side clearance", "clearance"),
             ("Speed", "speed"),
             ("Target speed", "target_speed"),
+            ("Requested accel", "requested_accel"),
+            ("Actual accel", "actual_accel"),
             ("Steering", "steering"),
             ("Lookahead", "lookahead"),
             ("Target point", "target_index"),
+            ("View", "view"),
         ]
         for label_text, key in metric_names:
             row = tk.Frame(panel, bg="#151a1f")
@@ -138,7 +195,7 @@ class ConeTrackAnimation:
 
         legend = tk.Label(
             panel,
-            text="Orange cones: left boundary\nBlue cones: right boundary\nGreen dot: pure pursuit target\nWhite body: 1.5 m wide car",
+            text="Orange cones: left boundary\nBlue cones: right boundary\nRed line: driven trajectory\nGreen dot: pure pursuit target\nWhite body: 1.5 m wide car",
             justify="left",
             bg="#151a1f",
             fg="#c7d0d6",
@@ -146,39 +203,36 @@ class ConeTrackAnimation:
         )
         legend.pack(anchor="w")
 
-        graph_title = tk.Label(
-            panel,
-            text="Live graph",
-            bg="#151a1f",
-            fg="#f3f5f4",
-            font=("Arial", 13, "bold"),
-        )
-        graph_title.pack(anchor="w", pady=(8, 6))
-
-        self.graph = tk.Canvas(panel, height=235, bg="#101316", highlightthickness=1, highlightbackground="#293138")
-        self.graph.pack(fill="x")
-
-        graph_legend = tk.Label(
-            panel,
-            text="Green: speed\nGray: target speed\nRed: steering",
-            justify="left",
-            bg="#151a1f",
-            fg="#c7d0d6",
-            pady=8,
-        )
-        graph_legend.pack(anchor="w")
-
     def reset(self) -> None:
         first = self.path[0]
         self.state = VehicleState(first.x - 1.2, first.y - 0.15, first.yaw, 0.0)
         self.last_target_index = 0
         self.integrator = 0.0
         self.sim_time_s = 0.0
-        self.history: list[dict[str, float]] = []
+        self.trajectory = [TrackPoint(self.state.x, self.state.y, self.state.yaw, self.state.speed)]
+        self.follow_vehicle()
 
     def toggle(self) -> None:
         self.running = not self.running
         self.play_button.config(text="Pause" if self.running else "Play")
+
+    def follow_vehicle(self) -> None:
+        self.follow_car.set(True)
+        self.view_center_x = self.state.x
+        self.view_center_y = self.state.y
+
+    def fit_track(self) -> None:
+        width = max(1, self.canvas.winfo_width())
+        height = max(1, self.canvas.winfo_height())
+        min_x, max_x, min_y, max_y = self._track_bounds()
+        track_width = max(max_x - min_x, 1.0)
+        track_height = max(max_y - min_y, 1.0)
+        base_scale = self._base_scale(width, height)
+        fit_zoom = min(width * 0.88 / track_width, height * 0.88 / track_height) / base_scale
+        self.zoom.set(self._clamp(fit_zoom, 0.2, 4.0))
+        self.view_center_x = 0.5 * (min_x + max_x)
+        self.view_center_y = 0.5 * (min_y + max_y)
+        self.follow_car.set(False)
 
     def run(self) -> None:
         self.root.mainloop()
@@ -195,30 +249,35 @@ class ConeTrackAnimation:
         high = self._pure_pursuit()
         low = self._speed_pi(high["target_speed"], dt_s)
 
-        accel = 5.0 * low["throttle"] - 6.0 * low["brake"] - 0.08 * self.state.speed
-        self.state.speed = max(0.0, self.state.speed + accel * dt_s)
-        yaw_rate = self.state.speed / self.wheelbase_m * math.tan(high["steering"])
+        requested_accel = requested_acceleration_from_actuators(low["throttle"], low["brake"])
+        powertrain_accel = self.powertrain.actual_acceleration(self.state.speed, requested_accel)
+        speed_before_lateral = max(0.0, self.state.speed + powertrain_accel * dt_s)
+        commanded_lateral_accel = (
+            speed_before_lateral * speed_before_lateral * math.tan(high["steering"]) / self.wheelbase_m
+        )
+        actual_long_force, actual_lateral_force, _ = apply_friction_circle(
+            self.vehicle_config.mass_kg * powertrain_accel,
+            self.vehicle_config.mass_kg * commanded_lateral_accel,
+            self.vehicle_config.mass_kg,
+        )
+        actual_accel = actual_long_force / self.vehicle_config.mass_kg
+        achievable_lateral_accel = actual_lateral_force / self.vehicle_config.mass_kg
+        self.state.speed = min(MAX_SPEED_30_KMH_MPS, max(0.0, self.state.speed + actual_accel * dt_s))
+        yaw_rate = achievable_lateral_accel / max(self.state.speed, 1e-3)
         self.state.yaw += yaw_rate * dt_s
         self.state.x += self.state.speed * math.cos(self.state.yaw) * dt_s
         self.state.y += self.state.speed * math.sin(self.state.yaw) * dt_s
         self.sim_time_s += dt_s
-
-        self.history.append(
-            {
-                "time": self.sim_time_s,
-                "speed": self.state.speed,
-                "target_speed": high["target_speed"],
-                "steering": high["steering"],
-            }
-        )
-        if len(self.history) > self.max_graph_samples:
-            self.history = self.history[-self.max_graph_samples :]
+        self._append_trajectory_point()
 
         self.metrics["speed"].config(text=f"{self.state.speed:.2f} m/s")
         self.metrics["target_speed"].config(text=f"{high['target_speed']:.2f} m/s")
+        self.metrics["requested_accel"].config(text=f"{requested_accel:.2f} m/s^2")
+        self.metrics["actual_accel"].config(text=f"{actual_accel:.2f} m/s^2")
         self.metrics["steering"].config(text=f"{high['steering']:.2f} rad")
         self.metrics["lookahead"].config(text=f"{high['lookahead']:.2f} m")
         self.metrics["target_index"].config(text=str(high["target_index"]))
+        self.metrics["view"].config(text="follow" if self.follow_car.get() else "manual")
 
     def _pure_pursuit(self) -> dict[str, float]:
         nearest = self._nearest_index()
@@ -285,9 +344,12 @@ class ConeTrackAnimation:
         height = max(1, self.canvas.winfo_height())
         self.canvas.delete("all")
 
-        scale = min(width / 132.0, height / 86.0)
-        camera_x = width / 2.0 - self.state.x * scale
-        camera_y = height / 2.0 + self.state.y * scale
+        scale = self._base_scale(width, height) * self.zoom.get()
+        if self.follow_car.get():
+            self.view_center_x = self.state.x
+            self.view_center_y = self.state.y
+        camera_x = width / 2.0 - self.view_center_x * scale
+        camera_y = height / 2.0 + self.view_center_y * scale
 
         def screen(point: TrackPoint | VehicleState) -> tuple[float, float]:
             return camera_x + point.x * scale, camera_y - point.y * scale
@@ -296,11 +358,11 @@ class ConeTrackAnimation:
         self._draw_polyline(self.path, screen, "#6d7a71", 2, True)
         self._draw_polyline(self.left_cones, screen, "#6b4b28", 2, True)
         self._draw_polyline(self.right_cones, screen, "#254e70", 2, True)
+        self._draw_polyline(self.trajectory, screen, "#e35d5b", 3, False)
         self._draw_cones(self.left_cones, screen, "#f4a23a", scale)
         self._draw_cones(self.right_cones, screen, "#3aa0f4", scale)
         self._draw_target(screen, scale)
         self._draw_car(screen, scale)
-        self._draw_live_graph()
 
     def _draw_grid(
         self,
@@ -320,6 +382,27 @@ class ConeTrackAnimation:
             self.canvas.create_line(0, y, width, y, fill="#2a332d")
             y += step
 
+    def _begin_pan(self, event: tk.Event) -> None:
+        self._drag_start = (float(event.x), float(event.y), self.view_center_x, self.view_center_y)
+        self.follow_car.set(False)
+
+    def _pan(self, event: tk.Event) -> None:
+        if self._drag_start is None:
+            return
+        start_x, start_y, center_x, center_y = self._drag_start
+        width = max(1, self.canvas.winfo_width())
+        height = max(1, self.canvas.winfo_height())
+        scale = self._base_scale(width, height) * self.zoom.get()
+        self.view_center_x = center_x - (float(event.x) - start_x) / scale
+        self.view_center_y = center_y + (float(event.y) - start_y) / scale
+
+    def _zoom_with_wheel(self, event: tk.Event) -> None:
+        if getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0:
+            factor = 0.9
+        else:
+            factor = 1.1
+        self.zoom.set(self._clamp(self.zoom.get() * factor, 0.2, 4.0))
+
     def _draw_polyline(
         self,
         points: list[TrackPoint],
@@ -328,6 +411,8 @@ class ConeTrackAnimation:
         width: int,
         closed: bool,
     ) -> None:
+        if len(points) < 2:
+            return
         coords: list[float] = []
         for point in points:
             x, y = screen(point)
@@ -402,87 +487,6 @@ class ConeTrackAnimation:
         )
         self.canvas.create_polygon(nose, fill="#e35d5b", outline="")
 
-    def _draw_live_graph(self) -> None:
-        width = max(1, self.graph.winfo_width())
-        height = max(1, self.graph.winfo_height())
-        self.graph.delete("all")
-
-        margin_left = 34
-        margin_right = 10
-        margin_top = 14
-        margin_bottom = 28
-        plot_x = margin_left
-        plot_y = margin_top
-        plot_w = max(1, width - margin_left - margin_right)
-        plot_h = max(1, height - margin_top - margin_bottom)
-
-        self.graph.create_rectangle(
-            plot_x,
-            plot_y,
-            plot_x + plot_w,
-            plot_y + plot_h,
-            outline="#293138",
-            fill="#11171b",
-        )
-
-        for i in range(1, 4):
-            y = plot_y + plot_h * i / 4
-            self.graph.create_line(plot_x, y, plot_x + plot_w, y, fill="#253039")
-
-        self.graph.create_text(8, plot_y + 2, text="25 m/s", anchor="nw", fill="#aeb9c1", font=("Arial", 9))
-        self.graph.create_text(8, plot_y + plot_h - 12, text="0", anchor="nw", fill="#aeb9c1", font=("Arial", 9))
-        self.graph.create_text(
-            plot_x,
-            height - 18,
-            text="rolling controller history",
-            anchor="w",
-            fill="#aeb9c1",
-            font=("Arial", 9),
-        )
-
-        if len(self.history) < 2:
-            return
-
-        self._draw_graph_series("speed", "#7cc7a0", 0.0, 25.0, plot_x, plot_y, plot_w, plot_h)
-        self._draw_graph_series(
-            "target_speed",
-            "#cfd6dc",
-            0.0,
-            25.0,
-            plot_x,
-            plot_y,
-            plot_w,
-            plot_h,
-            dash=(5, 4),
-        )
-        self._draw_graph_series("steering", "#e35d5b", -0.5, 0.5, plot_x, plot_y, plot_w, plot_h)
-
-    def _draw_graph_series(
-        self,
-        key: str,
-        color: str,
-        value_min: float,
-        value_max: float,
-        plot_x: float,
-        plot_y: float,
-        plot_w: float,
-        plot_h: float,
-        dash: tuple[int, int] | None = None,
-    ) -> None:
-        coords: list[float] = []
-        count = len(self.history)
-        for i, sample in enumerate(self.history):
-            x = plot_x + plot_w * i / max(1, count - 1)
-            normalized = (sample[key] - value_min) / (value_max - value_min)
-            normalized = self._clamp(normalized, 0.0, 1.0)
-            y = plot_y + plot_h * (1.0 - normalized)
-            coords.extend([x, y])
-
-        kwargs = {"fill": color, "width": 2}
-        if dash is not None:
-            kwargs["dash"] = dash
-        self.graph.create_line(*coords, **kwargs)
-
     @staticmethod
     def _rotate_translate(
         points: list[tuple[float, float]],
@@ -498,19 +502,45 @@ class ConeTrackAnimation:
         return coords
 
     def _build_track(self) -> list[TrackPoint]:
-        return build_fsd_autocross_track()
+        return self.path
 
     def _build_cones(self) -> tuple[list[TrackPoint], list[TrackPoint]]:
-        return build_cone_boundaries(
-            self.path,
-            track_width_m=self.track_width_m,
-            cone_spacing_m=self.cone_spacing_m,
+        return self.left_cones, self.right_cones
+
+    def _append_trajectory_point(self) -> None:
+        if not self.trajectory:
+            self.trajectory.append(TrackPoint(self.state.x, self.state.y, self.state.yaw, self.state.speed))
+            return
+        previous = self.trajectory[-1]
+        if math.hypot(self.state.x - previous.x, self.state.y - previous.y) >= 0.2:
+            self.trajectory.append(TrackPoint(self.state.x, self.state.y, self.state.yaw, self.state.speed))
+        if len(self.trajectory) > 6000:
+            self.trajectory = self.trajectory[-6000:]
+
+    def _track_bounds(self) -> tuple[float, float, float, float]:
+        points = [*self.path, *self.left_cones, *self.right_cones]
+        return (
+            min(point.x for point in points),
+            max(point.x for point in points),
+            min(point.y for point in points),
+            max(point.y for point in points),
         )
+
+    @staticmethod
+    def _base_scale(width: int, height: int) -> float:
+        return min(width / 132.0, height / 86.0)
 
     @staticmethod
     def _clamp(value: float, lower: float, upper: float) -> float:
         return min(max(value, lower), upper)
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the cone track pure pursuit animation.")
+    parser.add_argument("--track", default="autocross", help="Track name: autocross or hockenheim_fsg")
+    args = parser.parse_args()
+    ConeTrackAnimation(get_track(args.track)).run()
+
+
 if __name__ == "__main__":
-    ConeTrackAnimation().run()
+    main()
