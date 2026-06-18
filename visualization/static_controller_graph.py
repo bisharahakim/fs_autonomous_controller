@@ -7,12 +7,25 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fs_controller import VehicleState  # noqa: E402
+from fs_controller import (  # noqa: E402
+    MAX_SPEED_30_KMH_MPS,
+    PowertrainConfig,
+    PowertrainModel,
+    VehicleState,
+    apply_friction_circle,
+    requested_acceleration_from_actuators,
+)
 
 try:
-    from autocross_track import TrackPoint, build_fsd_autocross_track  # noqa: E402
+    from autocross_track import TrackPoint  # noqa: E402
+    from track_registry import get_track  # noqa: E402
 except ModuleNotFoundError:
-    from visualization.autocross_track import TrackPoint, build_fsd_autocross_track  # noqa: E402
+    from visualization.autocross_track import TrackPoint  # noqa: E402
+    from visualization.track_registry import get_track  # noqa: E402
+
+
+TRACK_NAME = "hockenheim_fsg"
+MAX_STEPS = 12000
 
 
 @dataclass(frozen=True)
@@ -25,6 +38,8 @@ class Sample:
     steering_rad: float
     throttle: float
     brake: float
+    requested_accel_mps2: float
+    actual_accel_mps2: float
     target_index: int
     lateral_error_m: float
     lookahead_m: float
@@ -37,15 +52,17 @@ class ClosedLoopControllerState:
 
 
 def make_track() -> list[TrackPoint]:
-    return build_fsd_autocross_track()
+    return remove_duplicate_finish(get_track(TRACK_NAME).build_centerline())
 
 
 def simulate() -> list[Sample]:
     wheelbase = 1.55
     path = make_track()
     controller = ClosedLoopControllerState()
+    powertrain = PowertrainModel()
+    vehicle_config = PowertrainConfig()
     state = VehicleState(
-        x=path[0].x - 1.2,
+        x=path[0].x - 1.2 * cos(path[0].yaw),
         y=path[0].y - 0.15,
         yaw=path[0].yaw,
         speed=0.0,
@@ -53,7 +70,8 @@ def simulate() -> list[Sample]:
     dt = 0.02
     samples: list[Sample] = []
 
-    for step in range(2600):
+    for step in range(MAX_STEPS):
+        previous_target_index = controller.target_index
         high = pure_pursuit(state, path, controller, wheelbase)
         low = speed_pi(
             target_speed_mps=high["target_speed"],
@@ -61,9 +79,19 @@ def simulate() -> list[Sample]:
             dt_s=dt,
             controller=controller,
         )
-        accel = 5.0 * low["throttle"] - 6.0 * low["brake"] - 0.08 * state.speed
-        speed = max(0.0, state.speed + accel * dt)
-        yaw_rate = speed / wheelbase * tan(high["steering"])
+        requested_accel = requested_acceleration_from_actuators(low["throttle"], low["brake"])
+        powertrain_accel = powertrain.actual_acceleration(state.speed, requested_accel)
+        speed_before_lateral = max(0.0, state.speed + powertrain_accel * dt)
+        commanded_lateral_accel = speed_before_lateral * speed_before_lateral * tan(high["steering"]) / wheelbase
+        actual_long_force, actual_lateral_force, _ = apply_friction_circle(
+            vehicle_config.mass_kg * powertrain_accel,
+            vehicle_config.mass_kg * commanded_lateral_accel,
+            vehicle_config.mass_kg,
+        )
+        actual_accel = actual_long_force / vehicle_config.mass_kg
+        achievable_lateral_accel = actual_lateral_force / vehicle_config.mass_kg
+        speed = min(MAX_SPEED_30_KMH_MPS, max(0.0, state.speed + actual_accel * dt))
+        yaw_rate = achievable_lateral_accel / max(speed, 1e-3)
         yaw = state.yaw + yaw_rate * dt
         x = state.x + speed * cos(yaw) * dt
         y = state.y + speed * sin(yaw) * dt
@@ -79,14 +107,20 @@ def simulate() -> list[Sample]:
                 steering_rad=high["steering"],
                 throttle=low["throttle"],
                 brake=low["brake"],
+                requested_accel_mps2=requested_accel,
+                actual_accel_mps2=actual_accel,
                 target_index=int(high["target_index"]),
                 lateral_error_m=nearest_path_distance(state, path),
                 lookahead_m=high["lookahead"],
             )
         )
 
-        finish = path[-1]
-        if high["target_index"] >= len(path) - 2 and hypot(state.x - finish.x, state.y - finish.y) < 2.0:
+        completed_lap = (
+            previous_target_index > len(path) - 80
+            and int(high["target_index"]) < 80
+            and step * dt > 5.0
+        )
+        if completed_lap:
             break
 
     return samples
@@ -102,7 +136,8 @@ def pure_pursuit(
     lookahead = clamp(3.0 + 0.2 * state.speed, 3.0, 18.0)
     target_index = nearest
 
-    for index in range(nearest, len(path)):
+    for offset in range(len(path)):
+        index = (nearest + offset) % len(path)
         point = path[index]
         if hypot(point.x - state.x, point.y - state.y) >= lookahead:
             target_index = index
@@ -144,13 +179,14 @@ def speed_pi(
 def nearest_index(state: VehicleState, path: list[TrackPoint], start_index: int) -> int:
     best_index = start_index
     best_distance = float("inf")
-    for index in range(start_index, len(path)):
+    for offset in range(len(path)):
+        index = (start_index + offset) % len(path)
         point = path[index]
         distance = (state.x - point.x) ** 2 + (state.y - point.y) ** 2
         if distance < best_distance:
             best_distance = distance
             best_index = index
-        if index - start_index > 180 and distance > best_distance * 6.0:
+        if offset > 180 and distance > best_distance * 6.0:
             break
     return best_index
 
@@ -182,7 +218,7 @@ def save_svg(samples: list[Sample], path: list[TrackPoint], output_path: Path) -
             "title": "Speed Tracking",
             "unit": "m/s",
             "min": 0.0,
-            "max": 20.0,
+            "max": 24.0,
             "series": [
                 ("Actual speed", "#218c5a", [s.speed_mps for s in samples]),
                 ("Target speed", "#6b7280", [s.target_speed_mps for s in samples]),
@@ -249,7 +285,7 @@ def save_svg(samples: list[Sample], path: list[TrackPoint], output_path: Path) -
     svg: list[str] = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" fill="#f8fafc"/>',
-        '<text x="34" y="38" font-family="Arial" font-size="26" font-weight="700" fill="#111827">Formula Student Controller Static Data</text>',
+        '<text x="34" y="38" font-family="Arial" font-size="26" font-weight="700" fill="#111827">Hockenheim FSG Controller Static Data</text>',
         f'<text x="34" y="62" font-family="Arial" font-size="13" fill="#4b5563">Samples: {len(samples)} | Duration: {time_max:.2f} s | Max tracking error: {max(s.lateral_error_m for s in samples):.2f} m | Average tracking error: {sum(s.lateral_error_m for s in samples) / len(samples):.2f} m</text>',
     ]
 
@@ -355,9 +391,23 @@ def trajectory_panel(
 def main() -> None:
     path = make_track()
     samples = simulate()
-    output_path = Path(__file__).resolve().parents[1] / "outputs" / "controller_static_graph.svg"
+    output_path = (
+        Path(__file__).resolve().parents[1]
+        / "outputs"
+        / f"{TRACK_NAME}_controller_static_graph.svg"
+    )
     save_svg(samples, path, output_path)
     print(f"Saved static graph to {output_path}")
+
+
+def remove_duplicate_finish(path: list[TrackPoint]) -> list[TrackPoint]:
+    if len(path) < 2:
+        return path
+    start = path[0]
+    finish = path[-1]
+    if hypot(finish.x - start.x, finish.y - start.y) < 1e-6:
+        return path[:-1]
+    return path
 
 
 if __name__ == "__main__":

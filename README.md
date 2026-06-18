@@ -50,6 +50,18 @@ Open:
 outputs/controller_settings_comparison.svg
 ```
 
+Compare regular pure pursuit against adaptive pure pursuit:
+
+```bash
+python3 examples/compare_pure_pursuit.py
+```
+
+Open:
+
+```text
+outputs/pure_pursuit_comparison.svg
+```
+
 ## What Each File Does
 
 ```text
@@ -109,6 +121,14 @@ examples/compare_controller_settings.py
 Visual example. It runs the same autocross track with multiple controller
 settings and saves a comparison SVG. This is the useful example for seeing how
 different lookahead and PI gains affect the path.
+
+```text
+examples/compare_pure_pursuit.py
+```
+
+Analytical comparison of regular fixed-lookahead pure pursuit and adaptive
+speed-based pure pursuit. It saves a readable SVG with trajectory, tracking
+error, lookahead, steering, speed tracking, and summary metrics.
 
 ## What You Should See
 
