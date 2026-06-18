@@ -16,4 +16,7 @@ __pycache__/
 # Data / large files
 *.raw
 *.npy
-data/
+data/outputs/
+__pycache__/
+*.pyc
+.DS_Store
