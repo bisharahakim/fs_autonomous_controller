@@ -20,6 +20,7 @@ from fs_controller import (  # noqa: E402
     requested_acceleration_from_actuators,
     tire_fit_summary,
 )
+from fs_controller.raceline import Raceline, load_raceline, wrap_angle  # noqa: E402
 from visualization.autocross_track import TrackPoint  # noqa: E402
 from visualization.hockenheim_fsg_track import (  # noqa: E402
     DEFAULT_DS_M as HOCKENHEIM_DS_M,
@@ -45,6 +46,10 @@ class Sample:
     actual_accel_mps2: float
     nearest_index: int
     segment_index: int
+    lookahead_speed_m: float
+    lookahead_curv_m: float
+    lookahead_used_m: float
+    kappa_max_horizon_radpm: float
 
 
 @dataclass(frozen=True)
@@ -62,6 +67,19 @@ class Event:
 class ClosedTrackControllerState:
     target_index: int = 0
     integrator: float = 0.0
+    previous_accel_cmd_mps2: float = 0.0
+
+
+@dataclass(frozen=True)
+class RacelineStart:
+    index: int
+    x_m: float
+    y_m: float
+    yaw_rad: float
+    yaw_deg: float
+    s_m: float
+    used_flip: bool
+    used_psi_alignment: bool
 
 
 @dataclass(frozen=True)
@@ -73,24 +91,48 @@ class RunResult:
     output_path: Path
     acceleration_output_path: Path
     lateral_acceleration_output_path: Path
+    lookahead_output_path: Path
+    raceline_start: RacelineStart | None = None
+    raceline_path: Path | None = None
 
 
 DT_S = 0.02
 WHEELBASE_M = 1.55
-CAR_WIDTH_M = 1.5
+CAR_WIDTH_M = 1.1
 MAX_STEPS = 12000
 PREVIOUS_SIMPLE_MODEL_HOCKENHEIM_LAP_S = 100.52
 PREVIOUS_POWERTRAIN_ONLY_HOCKENHEIM_LAP_S = 91.52
+OPTIMIZER_BENJAMIN24_LAP_S = 78.64
+OPTIMIZER_BENJAMIN24_TOP_SPEED_MPS = 24.92
+OPTIMIZER_BENJAMIN24_MAX_LAT_ACCEL_MPS2 = 13.27
+OPTIMIZER_BENJAMIN24_SAFE_LAP_S = 90.36
+OPTIMIZER_BENJAMIN24_SAFE_TOP_SPEED_MPS = 22.00
+OPTIMIZER_BENJAMIN24_SAFE_MAX_LAT_ACCEL_MPS2 = 10.30
+SAFE_BRAKING_ACCEL_MPS2 = 8.0
+SAFE_THROTTLE_ACCEL_MPS2 = 5.0
+RACELINE_SPEED_KP = 2.0
+RACELINE_SPEED_KI = 0.5
+RACELINE_INTEGRAL_LIMIT_MPS2 = 5.0
+MAX_JERK_THROTTLE_MPS3 = 8.0
+MAX_JERK_BRAKE_MPS3 = 20.0
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a baseline controller stack on a registered track.")
     parser.add_argument("--track", default="hockenheim_fsg", help="Track name, e.g. autocross or hockenheim_fsg")
+    parser.add_argument("--raceline", type=Path, help="Optional optimizer trajectory CSV to track instead of centerline")
+    parser.add_argument(
+        "--speed-cap",
+        nargs="?",
+        const=MAX_SPEED_30_KMH_MPS,
+        type=float,
+        help="Optional max speed in m/s. Passing --speed-cap without a value uses 30 km/h.",
+    )
     args = parser.parse_args()
     print_tire_fit_summary()
 
     try:
-        result = run_baseline(args.track)
+        result = run_baseline(args.track, args.raceline, args.speed_cap)
     except Exception:
         print("Baseline run failed with stack trace:")
         traceback.print_exc()
@@ -99,38 +141,60 @@ def main() -> None:
     report(result)
 
 
-def run_baseline(track_name: str) -> RunResult:
+def run_baseline(track_name: str, raceline_path: Path | None = None, speed_cap_mps: float | None = None) -> RunResult:
     track = get_track(track_name)
     centerline = track.build_centerline()
     left_cones, right_cones = track.build_cones()
     drive_centerline = remove_duplicate_finish(centerline)
     segment_indices = segment_indices_for(track_name, len(centerline))[: len(drive_centerline)]
+    raceline = load_raceline(raceline_path) if raceline_path is not None else None
+    raceline_start = prepare_raceline_start(raceline) if raceline is not None else None
+    if raceline is None and speed_cap_mps is None:
+        speed_cap_mps = MAX_SPEED_30_KMH_MPS
     controller = ClosedTrackControllerState()
     powertrain = PowertrainModel()
     vehicle_config = PowertrainConfig()
 
-    first = drive_centerline[0]
-    state = VehicleState(
-        x=first.x - 1.2 * math.cos(first.yaw),
-        y=first.y - 1.2 * math.sin(first.yaw) - 0.15,
-        yaw=first.yaw,
-        speed=0.0,
-    )
+    if raceline is None:
+        first = drive_centerline[0]
+        state = VehicleState(x=first.x, y=first.y, yaw=first.yaw, speed=0.5)
+    else:
+        assert raceline_start is not None
+        controller.target_index = raceline_start.index
+        state = VehicleState(
+            x=raceline_start.x_m,
+            y=raceline_start.y_m,
+            yaw=raceline_start.yaw_rad,
+            speed=0.5,
+        )
     samples: list[Sample] = []
     events: list[Event] = []
     completed_lap = False
+    append_initial_sample(samples, state, drive_centerline, segment_indices, raceline)
 
-    for step in range(MAX_STEPS):
+    for step in range(1, MAX_STEPS):
         previous_target_index = controller.target_index
-        high = pure_pursuit_closed(state, drive_centerline, controller)
-        low = speed_pi(
-            target_speed_mps=high["target_speed"],
-            measured_speed_mps=state.speed,
-            dt_s=DT_S,
-            controller=controller,
-        )
-
-        requested_accel = requested_acceleration_from_actuators(low["throttle"], low["brake"])
+        if raceline is None:
+            high = pure_pursuit_closed(state, drive_centerline, controller)
+        else:
+            high = raceline_pure_pursuit_closed(state, raceline, controller)
+        if raceline is None:
+            low = speed_pi(
+                target_speed_mps=high["target_speed"],
+                measured_speed_mps=state.speed,
+                dt_s=DT_S,
+                controller=controller,
+            )
+            requested_accel = requested_acceleration_from_actuators(low["throttle"], low["brake"])
+        else:
+            low = speed_feedforward_pi(
+                target_speed_mps=high["target_speed"],
+                target_accel_mps2=high["target_accel"],
+                measured_speed_mps=state.speed,
+                dt_s=DT_S,
+                controller=controller,
+            )
+            requested_accel = low["requested_accel"]
         powertrain_accel = powertrain.actual_acceleration(state.speed, requested_accel)
         speed_before_lateral = max(0.0, state.speed + powertrain_accel * DT_S)
         commanded_lateral_accel = (
@@ -143,15 +207,18 @@ def run_baseline(track_name: str) -> RunResult:
         )
         actual_accel = actual_long_force / vehicle_config.mass_kg
         achievable_lateral_accel = actual_lateral_force / vehicle_config.mass_kg
-        speed = min(MAX_SPEED_30_KMH_MPS, max(0.0, state.speed + actual_accel * DT_S))
+        speed = max(0.0, state.speed + actual_accel * DT_S)
+        if speed_cap_mps is not None:
+            speed = min(speed_cap_mps, speed)
         yaw_rate = achievable_lateral_accel / max(speed, 1e-3)
         yaw = state.yaw + yaw_rate * DT_S
         x = state.x + speed * math.cos(yaw) * DT_S
         y = state.y + speed * math.sin(yaw) * DT_S
         state = VehicleState(x=x, y=y, yaw=yaw, speed=speed)
 
-        nearest_index, lateral_error = nearest_path_distance(state, drive_centerline)
-        segment_index = segment_indices[min(nearest_index, len(segment_indices) - 1)]
+        centerline_nearest_index, lateral_error = nearest_path_distance(state, drive_centerline)
+        segment_index = segment_indices[min(centerline_nearest_index, len(segment_indices) - 1)]
+        nearest_index = int(high["nearest_index"]) if raceline is not None else centerline_nearest_index
         lateral_accel = abs(achievable_lateral_accel)
         samples.append(
             Sample(
@@ -170,6 +237,10 @@ def run_baseline(track_name: str) -> RunResult:
                 actual_accel_mps2=actual_accel,
                 nearest_index=nearest_index,
                 segment_index=segment_index,
+                lookahead_speed_m=high["lookahead_speed"],
+                lookahead_curv_m=high["lookahead_curv"],
+                lookahead_used_m=high["lookahead"],
+                kappa_max_horizon_radpm=high["kappa_max_horizon"],
             )
         )
 
@@ -201,7 +272,7 @@ def run_baseline(track_name: str) -> RunResult:
             )
 
         completed_lap = (
-            previous_target_index > len(drive_centerline) - 80
+            previous_target_index > reference_length_for_completion(drive_centerline, raceline) - 80
             and int(high["target_index"]) < 80
             and step * DT_S > 5.0
         )
@@ -209,13 +280,15 @@ def run_baseline(track_name: str) -> RunResult:
             completed_lap = True
             break
 
-    output_path = Path(__file__).resolve().parents[1] / "outputs" / f"{track_name}_baseline_trajectory.png"
+    output_name = f"{track_name}_raceline_tracking.png" if raceline is not None else f"{track_name}_baseline_trajectory.png"
+    output_path = Path(__file__).resolve().parents[1] / "outputs" / output_name
     acceleration_output_path = (
         Path(__file__).resolve().parents[1] / "outputs" / f"{track_name}_powertrain_acceleration.png"
     )
     lateral_acceleration_output_path = (
         Path(__file__).resolve().parents[1] / "outputs" / f"{track_name}_tire_lateral_acceleration.png"
     )
+    lookahead_output_path = Path(__file__).resolve().parents[1] / "outputs" / "diag_lookahead.png"
     save_trajectory_plot(
         output_path=output_path,
         track_name=track_name,
@@ -224,9 +297,12 @@ def run_baseline(track_name: str) -> RunResult:
         right_cones=right_cones,
         samples=samples,
         events=events,
+        raceline=raceline,
     )
     save_acceleration_plot(acceleration_output_path, track_name, samples)
     save_lateral_acceleration_plot(lateral_acceleration_output_path, track_name, samples)
+    if raceline is not None:
+        save_lookahead_diagnostic_plot(lookahead_output_path, track_name, samples)
     return RunResult(
         track_name=track_name,
         samples=samples,
@@ -235,6 +311,9 @@ def run_baseline(track_name: str) -> RunResult:
         output_path=output_path,
         acceleration_output_path=acceleration_output_path,
         lateral_acceleration_output_path=lateral_acceleration_output_path,
+        lookahead_output_path=lookahead_output_path,
+        raceline_start=raceline_start,
+        raceline_path=raceline_path,
     )
 
 
@@ -247,6 +326,112 @@ def remove_duplicate_finish(centerline: list[TrackPoint]) -> list[TrackPoint]:
     if math.hypot(finish.x - start.x, finish.y - start.y) < 1e-6:
         return centerline[:-1]
     return centerline
+
+
+def append_initial_sample(
+    samples: list[Sample],
+    state: VehicleState,
+    drive_centerline: list[TrackPoint],
+    segment_indices: list[int],
+    raceline: Raceline | None,
+) -> None:
+    centerline_nearest_index, lateral_error = nearest_path_distance(state, drive_centerline)
+    segment_index = segment_indices[min(centerline_nearest_index, len(segment_indices) - 1)]
+    if raceline is None:
+        target_index = 0
+        nearest_index = centerline_nearest_index
+        target_speed = drive_centerline[0].speed
+    else:
+        nearest_index = raceline.nearest_index(state.x, state.y)
+        target_index = nearest_index
+        target_speed = float(raceline.v_target_mps[target_index])
+
+    samples.append(
+        Sample(
+            time_s=0.0,
+            state=state,
+            target_index=target_index,
+            steering_rad=0.0,
+            throttle=0.0,
+            brake=0.0,
+            target_speed_mps=target_speed,
+            lateral_error_m=lateral_error,
+            lateral_accel_mps2=0.0,
+            commanded_lateral_accel_mps2=0.0,
+            achievable_lateral_accel_mps2=0.0,
+            requested_accel_mps2=0.0,
+            actual_accel_mps2=0.0,
+            nearest_index=nearest_index,
+            segment_index=segment_index,
+            lookahead_speed_m=0.0,
+            lookahead_curv_m=0.0,
+            lookahead_used_m=0.0,
+            kappa_max_horizon_radpm=0.0,
+        )
+    )
+
+
+def prepare_raceline_start(raceline: Raceline | None) -> RacelineStart | None:
+    if raceline is None:
+        return None
+
+    used_flip = False
+    used_psi_alignment = False
+    start_idx = raceline.closest_index_to(0.0, 0.0)
+    start_dist = math.hypot(float(raceline.x_m[start_idx]), float(raceline.y_m[start_idx]))
+    if start_dist > 2.0:
+        raise ValueError(
+            f"No raceline point near origin (closest is {start_dist:.2f} m at index {start_idx}). "
+            "Check that the raceline corresponds to this track."
+        )
+
+    yaw_rad = float(raceline.psi_rad[start_idx])
+    yaw_deg = normalize_degrees(math.degrees(yaw_rad))
+    if abs(yaw_deg) > 90.0:
+        geometric_yaw = raceline.geometric_heading_at(start_idx)
+        psi_error = wrap_angle(yaw_rad - geometric_yaw)
+        if abs(abs(math.degrees(psi_error)) - 90.0) < 15.0:
+            raceline.rotate_psi(-psi_error)
+            used_psi_alignment = True
+        else:
+            raceline.reverse_direction()
+            used_flip = True
+
+        start_idx = raceline.closest_index_to(0.0, 0.0)
+        yaw_rad = float(raceline.psi_rad[start_idx])
+        yaw_deg = normalize_degrees(math.degrees(yaw_rad))
+        if abs(yaw_deg) > 90.0:
+            raise ValueError(
+                f"Raceline at start points {yaw_deg:.1f} degrees from +x axis. "
+                "Expected near 0 degrees. The raceline may be traversed in the wrong direction."
+            )
+
+    start = RacelineStart(
+        index=start_idx,
+        x_m=float(raceline.x_m[start_idx]),
+        y_m=float(raceline.y_m[start_idx]),
+        yaw_rad=yaw_rad,
+        yaw_deg=yaw_deg,
+        s_m=float(raceline.s_m[start_idx]),
+        used_flip=used_flip,
+        used_psi_alignment=used_psi_alignment,
+    )
+    print(f"Start index in raceline: {start.index}")
+    print(f"Start position: ({start.x_m:.3f}, {start.y_m:.3f})")
+    print(f"Start yaw: {start.yaw_rad:.3f} rad ({start.yaw_deg:.1f} degrees)")
+    if start.used_flip:
+        print("Raceline direction correction: Option A flip applied.")
+    if start.used_psi_alignment:
+        print("Raceline yaw correction: psi column aligned to geometric tangent.")
+    return start
+
+
+def normalize_degrees(angle_deg: float) -> float:
+    while angle_deg > 180.0:
+        angle_deg -= 360.0
+    while angle_deg <= -180.0:
+        angle_deg += 360.0
+    return angle_deg
 
 
 def segment_indices_for(track_name: str, centerline_length: int) -> list[int]:
@@ -264,6 +449,12 @@ def nearest_path_distance(state: VehicleState, path: list[TrackPoint]) -> tuple[
             best_index = index
             best_distance = distance
     return best_index, best_distance
+
+
+def reference_length_for_completion(path: list[TrackPoint], raceline: Raceline | None) -> int:
+    if raceline is None:
+        return len(path)
+    return len(raceline.s_m) - 1
 
 
 def pure_pursuit_closed(
@@ -295,8 +486,65 @@ def pure_pursuit_closed(
     return {
         "steering": steering,
         "target_speed": target.speed,
+        "target_accel": 0.0,
         "target_index": float(target_index),
+        "nearest_index": float(nearest),
         "lookahead": lookahead,
+        "lookahead_speed": lookahead,
+        "lookahead_curv": lookahead,
+        "kappa_max_horizon": 0.0,
+    }
+
+
+def compute_lookahead(
+    v_actual: float,
+    raceline: Raceline,
+    s_now: float,
+    horizon: float = 10.0,
+) -> tuple[float, float, float, float]:
+    sample_count = 20
+    s_samples = [
+        (s_now + horizon * i / (sample_count - 1)) % raceline.total_s
+        for i in range(sample_count)
+    ]
+    kappa_max = max(abs(raceline.kappa_at(s)) for s in s_samples)
+    lookahead_speed = v_actual * 0.45
+    lookahead_curv = 1.0 / max(kappa_max, 1e-3)
+    lookahead = clamp(min(lookahead_speed, lookahead_curv), 2.0, 6.0)
+    return lookahead, lookahead_speed, lookahead_curv, kappa_max
+
+
+def raceline_pure_pursuit_closed(
+    state: VehicleState,
+    raceline: Raceline,
+    controller: ClosedTrackControllerState,
+) -> dict[str, float]:
+    nearest = raceline.nearest_index(state.x, state.y)
+    s_now = float(raceline.s_m[nearest])
+    lookahead, lookahead_speed, lookahead_curv, kappa_max = compute_lookahead(state.speed, raceline, s_now)
+    target = raceline.target_at_s(s_now + lookahead)
+    brake_distance = max(3.0, state.speed * state.speed / (2.0 * 8.0))
+    speed_target = raceline.target_at_s(s_now + brake_distance)
+    controller.target_index = target.index
+
+    dx = target.x_m - state.x
+    dy = target.y_m - state.y
+    local_x = math.cos(state.yaw) * dx + math.sin(state.yaw) * dy
+    local_y = -math.sin(state.yaw) * dx + math.cos(state.yaw) * dy
+    distance_sq = max(local_x * local_x + local_y * local_y, 1e-6)
+    curvature = 0.0 if local_x <= 0.0 else 2.0 * local_y / distance_sq
+    steering = clamp(math.atan(WHEELBASE_M * curvature), -0.5, 0.5)
+
+    return {
+        "steering": steering,
+        "target_speed": speed_target.v_target_mps,
+        "target_accel": speed_target.a_target_mps2,
+        "target_index": float(target.index),
+        "nearest_index": float(nearest),
+        "lookahead": lookahead,
+        "lookahead_speed": lookahead_speed,
+        "lookahead_curv": lookahead_curv,
+        "kappa_max_horizon": kappa_max,
     }
 
 
@@ -331,6 +579,32 @@ def speed_pi(
     return {
         "throttle": clamp(command, 0.0, 1.0),
         "brake": clamp(-1.3 * command, 0.0, 1.0),
+    }
+
+
+def speed_feedforward_pi(
+    target_speed_mps: float,
+    target_accel_mps2: float,
+    measured_speed_mps: float,
+    dt_s: float,
+    controller: ClosedTrackControllerState,
+) -> dict[str, float]:
+    error = target_speed_mps - measured_speed_mps
+    controller.integrator = clamp(
+        controller.integrator + RACELINE_SPEED_KI * error * dt_s,
+        -RACELINE_INTEGRAL_LIMIT_MPS2,
+        RACELINE_INTEGRAL_LIMIT_MPS2,
+    )
+    raw_accel = target_accel_mps2 + RACELINE_SPEED_KP * error + controller.integrator
+    lower = controller.previous_accel_cmd_mps2 - MAX_JERK_BRAKE_MPS3 * dt_s
+    upper = controller.previous_accel_cmd_mps2 + MAX_JERK_THROTTLE_MPS3 * dt_s
+    accel_cmd = clamp(raw_accel, lower, upper)
+    controller.previous_accel_cmd_mps2 = accel_cmd
+
+    return {
+        "throttle": clamp(accel_cmd / SAFE_THROTTLE_ACCEL_MPS2, 0.0, 1.0),
+        "brake": clamp(-accel_cmd / SAFE_BRAKING_ACCEL_MPS2, 0.0, 1.0),
+        "requested_accel": accel_cmd,
     }
 
 
@@ -389,6 +663,7 @@ def save_trajectory_plot(
     right_cones: list[TrackPoint],
     samples: list[Sample],
     events: list[Event],
+    raceline: Raceline | None = None,
 ) -> None:
     os.environ.setdefault(
         "MPLCONFIGDIR",
@@ -423,10 +698,18 @@ def save_trajectory_plot(
         label="right cones",
     )
     if samples:
+        if raceline is not None:
+            ax.plot(
+                raceline.x_m,
+                raceline.y_m,
+                color="#dc2626",
+                linewidth=1.4,
+                label="planned raceline",
+            )
         ax.plot(
             [sample.state.x for sample in samples],
             [sample.state.y for sample in samples],
-            color="#ef4444",
+            color="#2563eb" if raceline is not None else "#ef4444",
             linewidth=1.8,
             label="driven trajectory",
         )
@@ -439,19 +722,27 @@ def save_trajectory_plot(
             label="start",
             zorder=5,
         )
-    for event in events[:12]:
+    cone_hit_label_added = False
+    cone_hit_label_count = 0
+    for event in events:
+        if event.kind != "cone_hit":
+            continue
         ax.scatter(
             [event.x_m],
             [event.y_m],
             s=90,
             color="#dc2626",
             marker="x",
-            label=f"incident: {event.kind}" if event == events[0] else "",
+            label="" if cone_hit_label_added else "cone hit",
             zorder=6,
         )
-        ax.text(event.x_m + 2.0, event.y_m + 2.0, f"segment {event.segment_index}", color="#991b1b")
+        cone_hit_label_added = True
+        if raceline is None or cone_hit_label_count < 12:
+            ax.text(event.x_m + 2.0, event.y_m + 2.0, f"segment {event.segment_index}", color="#991b1b")
+        cone_hit_label_count += 1
 
-    ax.set_title(f"{track_name} baseline trajectory")
+    title_suffix = "raceline tracking" if raceline is not None else "baseline trajectory"
+    ax.set_title(f"{track_name} {title_suffix}")
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     ax.axis("equal")
@@ -540,6 +831,52 @@ def save_lateral_acceleration_plot(output_path: Path, track_name: str, samples: 
     plt.close(fig)
 
 
+def save_lookahead_diagnostic_plot(output_path: Path, track_name: str, samples: list[Sample]) -> None:
+    os.environ.setdefault(
+        "MPLCONFIGDIR",
+        str(Path(tempfile.gettempdir()) / "fs_autonomous_controller_matplotlib"),
+    )
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(12, 5.2))
+    times = [sample.time_s for sample in samples]
+    ax.plot(
+        times,
+        [sample.lookahead_speed_m for sample in samples],
+        color="#2563eb",
+        linewidth=2.0,
+        alpha=0.75,
+        label="L_speed",
+    )
+    ax.plot(
+        times,
+        [sample.lookahead_curv_m for sample in samples],
+        color="#dc2626",
+        linewidth=1.6,
+        alpha=0.8,
+        label="L_curv",
+    )
+    ax.plot(
+        times,
+        [sample.lookahead_used_m for sample in samples],
+        color="#111827",
+        linewidth=2.3,
+        label="lookahead used",
+    )
+    ax.set_title(f"{track_name} curvature-aware lookahead diagnostic")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("lookahead [m]")
+    ax.grid(True, color="#e5e7eb", linewidth=0.7)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
 def print_tire_fit_summary() -> None:
     print("Tire grip fit sanity check:")
     for row in tire_fit_summary():
@@ -561,9 +898,17 @@ def report(result: RunResult) -> None:
         and sample.actual_accel_mps2 < sample.requested_accel_mps2 - 0.05
     ]
     last = samples[-1]
+    opt_lap, opt_top_speed, opt_lat_accel = optimizer_reference_metrics(result.raceline_path)
     print(f"Track: {result.track_name}")
+    if result.raceline_path is not None:
+        print(f"Raceline: {result.raceline_path}")
+        print(f"Optimizer predicted lap time: {opt_lap:.2f} s")
     if result.completed_lap:
         print(f"Lap time: {last.time_s:.2f} s")
+        if result.raceline_path is not None:
+            gap = last.time_s - opt_lap
+            gap_pct = 100.0 * gap / opt_lap
+            print(f"Gap to optimizer: {gap:+.2f} s ({gap_pct:+.1f}%)")
         if result.track_name == "hockenheim_fsg":
             delta_powertrain = last.time_s - PREVIOUS_POWERTRAIN_ONLY_HOCKENHEIM_LAP_S
             delta_simple = last.time_s - PREVIOUS_SIMPLE_MODEL_HOCKENHEIM_LAP_S
@@ -591,6 +936,12 @@ def report(result: RunResult) -> None:
         print("Incidents recorded: 0")
     print(f"Max lateral acceleration: {max_lateral_accel:.2f} m/s^2")
     print(f"Max speed: {max_speed:.2f} m/s")
+    if result.raceline_path is not None:
+        max_target_speed = max(sample.target_speed_mps for sample in samples)
+        print(f"Max target speed seen by controller: {max_target_speed:.2f} m/s")
+        print(f"Optimizer max lateral acceleration: {opt_lat_accel:.2f} m/s^2")
+        print(f"Optimizer max speed: {opt_top_speed:.2f} m/s")
+        print_lookahead_binding_summary(result)
     print(
         "Powertrain-limited drive samples: "
         f"{len(clipped_samples)} / {len(samples)} "
@@ -601,6 +952,50 @@ def report(result: RunResult) -> None:
     print(f"Trajectory plot: {result.output_path}")
     print(f"Acceleration plot: {result.acceleration_output_path}")
     print(f"Lateral acceleration plot: {result.lateral_acceleration_output_path}")
+    if result.raceline_path is not None:
+        print(f"Lookahead diagnostic plot: {result.lookahead_output_path}")
+
+
+def print_lookahead_binding_summary(result: RunResult) -> None:
+    if result.raceline_path is None:
+        return
+
+    raceline = load_raceline(result.raceline_path)
+    binding_samples = [
+        sample
+        for sample in result.samples
+        if sample.lookahead_curv_m < sample.lookahead_speed_m - 1e-6
+        and sample.lookahead_used_m <= sample.lookahead_curv_m + 1e-6
+    ]
+    if not binding_samples:
+        print("Curvature lookahead binding: never")
+        return
+
+    first = binding_samples[0]
+    last = binding_samples[-1]
+    first_s = float(raceline.s_m[min(first.nearest_index, len(raceline.s_m) - 1)])
+    last_s = float(raceline.s_m[min(last.nearest_index, len(raceline.s_m) - 1)])
+    max_reduction = max(sample.lookahead_speed_m - sample.lookahead_used_m for sample in binding_samples)
+    print(
+        "Curvature lookahead binding: "
+        f"{len(binding_samples)} samples, first at t={first.time_s:.2f} s / s={first_s:.2f} m, "
+        f"last at t={last.time_s:.2f} s / s={last_s:.2f} m, "
+        f"max reduction {max_reduction:.2f} m"
+    )
+
+
+def optimizer_reference_metrics(raceline_path: Path | None) -> tuple[float, float, float]:
+    if raceline_path is not None and "safe" in raceline_path.name:
+        return (
+            OPTIMIZER_BENJAMIN24_SAFE_LAP_S,
+            OPTIMIZER_BENJAMIN24_SAFE_TOP_SPEED_MPS,
+            OPTIMIZER_BENJAMIN24_SAFE_MAX_LAT_ACCEL_MPS2,
+        )
+    return (
+        OPTIMIZER_BENJAMIN24_LAP_S,
+        OPTIMIZER_BENJAMIN24_TOP_SPEED_MPS,
+        OPTIMIZER_BENJAMIN24_MAX_LAT_ACCEL_MPS2,
+    )
 
 
 if __name__ == "__main__":
