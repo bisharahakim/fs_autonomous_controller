@@ -131,22 +131,23 @@ class ConeTrackAnimation:
             highlightthickness=0,
         ).pack(side="left")
 
-        tk.Label(toolbar, text="Lookahead", bg="#151a1f", fg="#c7d0d6").pack(
-            side="left", padx=(22, 6)
-        )
-        tk.Scale(
-            toolbar,
-            from_=0.15,
-            to=0.8,
-            resolution=0.01,
-            orient="horizontal",
-            variable=self.lookahead_gain,
-            length=150,
-            showvalue=False,
-            bg="#151a1f",
-            fg="#f3f5f4",
-            highlightthickness=0,
-        ).pack(side="left")
+        if self.raceline is None:
+            tk.Label(toolbar, text="Lookahead", bg="#151a1f", fg="#c7d0d6").pack(
+                side="left", padx=(22, 6)
+            )
+            tk.Scale(
+                toolbar,
+                from_=0.15,
+                to=0.8,
+                resolution=0.01,
+                orient="horizontal",
+                variable=self.lookahead_gain,
+                length=150,
+                showvalue=False,
+                bg="#151a1f",
+                fg="#f3f5f4",
+                highlightthickness=0,
+            ).pack(side="left")
 
         tk.Label(toolbar, text="Zoom", bg="#151a1f", fg="#c7d0d6").pack(
             side="left", padx=(22, 6)
@@ -216,7 +217,7 @@ class ConeTrackAnimation:
                 "Orange cones: left boundary\n"
                 "Blue cones: right boundary\n"
                 "Red line: planned raceline\n"
-                "Pink line: driven trajectory\n"
+                "Cyan line: driven trajectory\n"
                 "Green dot: pure pursuit target\n"
                 "White body: 1.1 m wide car"
             ),
@@ -484,7 +485,7 @@ class ConeTrackAnimation:
             self._draw_polyline(self.raceline_points, screen, "#f04444", 2, True)
         self._draw_polyline(self.left_cones, screen, "#6b4b28", 2, True)
         self._draw_polyline(self.right_cones, screen, "#254e70", 2, True)
-        self._draw_polyline(self.trajectory, screen, "#e35d5b", 3, False)
+        self._draw_polyline(self.trajectory, screen, "#22d3ee", 3, False)
         self._draw_cones(self.left_cones, screen, "#f4a23a", scale)
         self._draw_cones(self.right_cones, screen, "#3aa0f4", scale)
         self._draw_target(screen, scale)
