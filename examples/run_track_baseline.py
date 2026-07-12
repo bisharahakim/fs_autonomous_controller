@@ -21,6 +21,7 @@ from fs_controller import (  # noqa: E402
     tire_fit_summary,
 )
 from fs_controller.raceline import Raceline, load_raceline, wrap_angle  # noqa: E402
+from fs_controller.rapp import RAPP, RAPPCommand, RAPPConfig  # noqa: E402
 from visualization.autocross_track import TrackPoint  # noqa: E402
 from visualization.hockenheim_fsg_track import (  # noqa: E402
     DEFAULT_DS_M as HOCKENHEIM_DS_M,
@@ -128,11 +129,18 @@ def main() -> None:
         type=float,
         help="Optional max speed in m/s. Passing --speed-cap without a value uses 30 km/h.",
     )
+    parser.add_argument(
+        "--rapp-horizon-behind",
+        type=float,
+        default=RAPPConfig.horizon_behind,
+        help="Backward curvature window in meters for raceline RAPP tracking.",
+    )
     args = parser.parse_args()
     print_tire_fit_summary()
 
     try:
-        result = run_baseline(args.track, args.raceline, args.speed_cap)
+        rapp_config = RAPPConfig(horizon_behind=args.rapp_horizon_behind)
+        result = run_baseline(args.track, args.raceline, args.speed_cap, rapp_config)
     except Exception:
         print("Baseline run failed with stack trace:")
         traceback.print_exc()
@@ -141,7 +149,12 @@ def main() -> None:
     report(result)
 
 
-def run_baseline(track_name: str, raceline_path: Path | None = None, speed_cap_mps: float | None = None) -> RunResult:
+def run_baseline(
+    track_name: str,
+    raceline_path: Path | None = None,
+    speed_cap_mps: float | None = None,
+    rapp_config: RAPPConfig | None = None,
+) -> RunResult:
     track = get_track(track_name)
     centerline = track.build_centerline()
     left_cones, right_cones = track.build_cones()
@@ -151,6 +164,7 @@ def run_baseline(track_name: str, raceline_path: Path | None = None, speed_cap_m
     raceline_start = prepare_raceline_start(raceline) if raceline is not None else None
     if raceline is None and speed_cap_mps is None:
         speed_cap_mps = MAX_SPEED_30_KMH_MPS
+    rapp = RAPP(raceline, rapp_config) if raceline is not None else None
     controller = ClosedTrackControllerState()
     powertrain = PowertrainModel()
     vehicle_config = PowertrainConfig()
@@ -177,7 +191,10 @@ def run_baseline(track_name: str, raceline_path: Path | None = None, speed_cap_m
         if raceline is None:
             high = pure_pursuit_closed(state, drive_centerline, controller)
         else:
-            high = raceline_pure_pursuit_closed(state, raceline, controller)
+            assert rapp is not None
+            command = rapp.compute_control(state.x, state.y, state.yaw, state.speed)
+            controller.target_index = command.target_index
+            high = rapp_command_to_dict(command)
         if raceline is None:
             low = speed_pi(
                 target_speed_mps=high["target_speed"],
@@ -496,55 +513,17 @@ def pure_pursuit_closed(
     }
 
 
-def compute_lookahead(
-    v_actual: float,
-    raceline: Raceline,
-    s_now: float,
-    horizon: float = 10.0,
-) -> tuple[float, float, float, float]:
-    sample_count = 20
-    s_samples = [
-        (s_now + horizon * i / (sample_count - 1)) % raceline.total_s
-        for i in range(sample_count)
-    ]
-    kappa_max = max(abs(raceline.kappa_at(s)) for s in s_samples)
-    lookahead_speed = v_actual * 0.45
-    lookahead_curv = 1.0 / max(kappa_max, 1e-3)
-    lookahead = clamp(min(lookahead_speed, lookahead_curv), 2.0, 6.0)
-    return lookahead, lookahead_speed, lookahead_curv, kappa_max
-
-
-def raceline_pure_pursuit_closed(
-    state: VehicleState,
-    raceline: Raceline,
-    controller: ClosedTrackControllerState,
-) -> dict[str, float]:
-    nearest = raceline.nearest_index(state.x, state.y)
-    s_now = float(raceline.s_m[nearest])
-    lookahead, lookahead_speed, lookahead_curv, kappa_max = compute_lookahead(state.speed, raceline, s_now)
-    target = raceline.target_at_s(s_now + lookahead)
-    brake_distance = max(3.0, state.speed * state.speed / (2.0 * 8.0))
-    speed_target = raceline.target_at_s(s_now + brake_distance)
-    controller.target_index = target.index
-
-    dx = target.x_m - state.x
-    dy = target.y_m - state.y
-    local_x = math.cos(state.yaw) * dx + math.sin(state.yaw) * dy
-    local_y = -math.sin(state.yaw) * dx + math.cos(state.yaw) * dy
-    distance_sq = max(local_x * local_x + local_y * local_y, 1e-6)
-    curvature = 0.0 if local_x <= 0.0 else 2.0 * local_y / distance_sq
-    steering = clamp(math.atan(WHEELBASE_M * curvature), -0.5, 0.5)
-
+def rapp_command_to_dict(command: RAPPCommand) -> dict[str, float]:
     return {
-        "steering": steering,
-        "target_speed": speed_target.v_target_mps,
-        "target_accel": speed_target.a_target_mps2,
-        "target_index": float(target.index),
-        "nearest_index": float(nearest),
-        "lookahead": lookahead,
-        "lookahead_speed": lookahead_speed,
-        "lookahead_curv": lookahead_curv,
-        "kappa_max_horizon": kappa_max,
+        "steering": command.steering,
+        "target_speed": command.target_speed,
+        "target_accel": command.target_accel,
+        "target_index": float(command.target_index),
+        "nearest_index": float(command.nearest_index),
+        "lookahead": command.lookahead_used,
+        "lookahead_speed": command.lookahead_speed,
+        "lookahead_curv": command.lookahead_curv,
+        "kappa_max_horizon": command.kappa_window,
     }
 
 

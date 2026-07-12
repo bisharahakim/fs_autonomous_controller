@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from .raceline import Raceline, RacelineTarget
 
@@ -24,6 +25,8 @@ class RAPPCommand:
     target_speed: float
     target_accel: float
     target_index: int
+    target_x: float
+    target_y: float
     nearest_index: int
     lookahead_used: float
     s_now: float
@@ -41,7 +44,39 @@ class RAPP:
         self.config = config or RAPPConfig()
 
     def compute_control(self, x: float, y: float, yaw: float, v: float) -> RAPPCommand:
-        raise NotImplementedError
+        nearest = self.raceline.nearest_index(x, y)
+        s_now = float(self.raceline.s_m[nearest])
+        lookahead, lookahead_speed, lookahead_curv, kappa_window = self.compute_lookahead(v, s_now)
+        target = self.raceline.target_at_s(s_now + lookahead)
+        speed_target, s_lookup = self.speed_target(s_now, v)
+
+        dx = target.x_m - x
+        dy = target.y_m - y
+        local_x = math.cos(yaw) * dx + math.sin(yaw) * dy
+        local_y = -math.sin(yaw) * dx + math.cos(yaw) * dy
+        distance_sq = max(local_x * local_x + local_y * local_y, 1e-6)
+        curvature = 0.0 if local_x <= 0.0 else 2.0 * local_y / distance_sq
+        steering = clamp(
+            math.atan(self.config.wheelbase_m * curvature),
+            -self.config.max_steer_rad,
+            self.config.max_steer_rad,
+        )
+
+        return RAPPCommand(
+            steering=steering,
+            target_speed=speed_target.v_target_mps,
+            target_accel=speed_target.a_target_mps2,
+            target_index=target.index,
+            target_x=target.x_m,
+            target_y=target.y_m,
+            nearest_index=nearest,
+            lookahead_used=lookahead,
+            s_now=s_now,
+            s_lookup=s_lookup,
+            kappa_window=kappa_window,
+            lookahead_speed=lookahead_speed,
+            lookahead_curv=lookahead_curv,
+        )
 
     def compute_lookahead(self, v: float, s_now: float) -> tuple[float, float, float, float]:
         config = self.config

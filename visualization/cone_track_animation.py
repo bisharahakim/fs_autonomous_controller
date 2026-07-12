@@ -24,6 +24,7 @@ from fs_controller import (
     requested_acceleration_from_actuators,
 )
 from fs_controller.raceline import Raceline, load_raceline, wrap_angle
+from fs_controller.rapp import RAPP, RAPPCommand
 
 
 @dataclass
@@ -54,6 +55,7 @@ class ConeTrackAnimation:
         self.powertrain = PowertrainModel()
         self.vehicle_config = PowertrainConfig()
         self.raceline: Raceline | None = load_raceline(raceline_path) if raceline_path is not None else None
+        self.rapp = RAPP(self.raceline) if self.raceline is not None else None
         self.raceline_points = (
             [TrackPoint(float(x), float(y)) for x, y in zip(self.raceline.x_m, self.raceline.y_m)]
             if self.raceline is not None
@@ -402,58 +404,23 @@ class ConeTrackAnimation:
         }
 
     def _raceline_pure_pursuit(self) -> dict[str, float]:
-        if self.raceline is None:
+        if self.rapp is None:
             return self._pure_pursuit()
 
-        nearest = self.raceline.nearest_index(self.state.x, self.state.y)
-        s_now = float(self.raceline.s_m[nearest])
-        lookahead, _, _, _ = self._compute_raceline_lookahead(self.state.speed, s_now)
-        target = self.raceline.target_at_s(s_now + lookahead)
-        brake_distance = max(3.0, self.state.speed * self.state.speed / (2.0 * 8.0))
-        speed_target = self.raceline.target_at_s(s_now + brake_distance)
-        self.last_target_index = target.index
-        self.target_marker = TrackPoint(target.x_m, target.y_m)
+        command = self.rapp.compute_control(self.state.x, self.state.y, self.state.yaw, self.state.speed)
+        self.last_target_index = command.target_index
+        self.target_marker = TrackPoint(command.target_x, command.target_y)
+        return self._rapp_command_to_dict(command)
 
-        dx = target.x_m - self.state.x
-        dy = target.y_m - self.state.y
-        local_x = math.cos(self.state.yaw) * dx + math.sin(self.state.yaw) * dy
-        local_y = -math.sin(self.state.yaw) * dx + math.cos(self.state.yaw) * dy
-        distance_sq = max(local_x * local_x + local_y * local_y, 1e-6)
-        curvature = 0.0 if local_x <= 0.0 else 2.0 * local_y / distance_sq
-        steering = self._clamp(
-            math.atan(self.wheelbase_m * curvature),
-            -self.max_steer_rad,
-            self.max_steer_rad,
-        )
-
+    @staticmethod
+    def _rapp_command_to_dict(command: RAPPCommand) -> dict[str, float]:
         return {
-            "steering": steering,
-            "target_speed": speed_target.v_target_mps,
-            "target_accel": speed_target.a_target_mps2,
-            "target_index": target.index,
-            "lookahead": lookahead,
+            "steering": command.steering,
+            "target_speed": command.target_speed,
+            "target_accel": command.target_accel,
+            "target_index": command.target_index,
+            "lookahead": command.lookahead_used,
         }
-
-    def _compute_raceline_lookahead(
-        self,
-        v_actual: float,
-        s_now: float,
-        horizon: float = 10.0,
-    ) -> tuple[float, float, float, float]:
-        if self.raceline is None:
-            lookahead = self._clamp(v_actual * 0.45, 2.0, 6.0)
-            return lookahead, lookahead, lookahead, 0.0
-
-        sample_count = 20
-        s_samples = [
-            (s_now + horizon * i / (sample_count - 1)) % self.raceline.total_s
-            for i in range(sample_count)
-        ]
-        kappa_max = max(abs(self.raceline.kappa_at(s)) for s in s_samples)
-        lookahead_speed = v_actual * 0.45
-        lookahead_curv = 1.0 / max(kappa_max, 1e-3)
-        lookahead = self._clamp(min(lookahead_speed, lookahead_curv), 2.0, 6.0)
-        return lookahead, lookahead_speed, lookahead_curv, kappa_max
 
     def _speed_pi(self, target_speed: float, dt_s: float) -> dict[str, float]:
         error = target_speed - self.state.speed
