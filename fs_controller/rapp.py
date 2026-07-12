@@ -43,6 +43,25 @@ class RAPP:
     def compute_control(self, x: float, y: float, yaw: float, v: float) -> RAPPCommand:
         raise NotImplementedError
 
+    def compute_lookahead(self, v: float, s_now: float) -> tuple[float, float, float, float]:
+        config = self.config
+        sample_count = 20
+        window_start = s_now - config.horizon_behind
+        window_length = config.horizon_behind + config.horizon_ahead
+        s_samples = [
+            (window_start + window_length * i / (sample_count - 1)) % self.raceline.total_s
+            for i in range(sample_count)
+        ]
+        kappa_window = max(abs(self.raceline.kappa_at(s)) for s in s_samples)
+        lookahead_speed = v * config.speed_gain
+        lookahead_curv = 1.0 / max(kappa_window, 1e-3)
+        lookahead = clamp(
+            min(lookahead_speed, lookahead_curv),
+            config.lookahead_min,
+            config.lookahead_max,
+        )
+        return lookahead, lookahead_speed, lookahead_curv, kappa_window
+
 
 def clamp(value: float, lower: float, upper: float) -> float:
     return min(max(value, lower), upper)
