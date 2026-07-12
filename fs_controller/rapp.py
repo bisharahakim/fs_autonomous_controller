@@ -17,6 +17,7 @@ class RAPPConfig:
     brake_dist_min: float = 3.0
     wheelbase_m: float = 1.55
     max_steer_rad: float = 0.5
+    window_samples: int = 20
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,10 @@ class RAPP:
     def __init__(self, raceline: Raceline, config: RAPPConfig | None = None) -> None:
         self.raceline = raceline
         self.config = config or RAPPConfig()
+        if self.config.window_samples < 2:
+            raise ValueError("window_samples must be at least 2")
+        if self.config.brake_decel <= 0.0:
+            raise ValueError("brake_decel must be positive")
 
     def compute_control(self, x: float, y: float, yaw: float, v: float) -> RAPPCommand:
         nearest = self.raceline.nearest_index(x, y)
@@ -80,12 +85,11 @@ class RAPP:
 
     def compute_lookahead(self, v: float, s_now: float) -> tuple[float, float, float, float]:
         config = self.config
-        sample_count = 20
         window_start = s_now - config.horizon_behind
         window_length = config.horizon_behind + config.horizon_ahead
         s_samples = [
-            (window_start + window_length * i / (sample_count - 1)) % self.raceline.total_s
-            for i in range(sample_count)
+            (window_start + window_length * i / (config.window_samples - 1)) % self.raceline.total_s
+            for i in range(config.window_samples)
         ]
         kappa_window = max(abs(self.raceline.kappa_at(s)) for s in s_samples)
         lookahead_speed = v * config.speed_gain
@@ -103,7 +107,14 @@ class RAPP:
             v * v / (2.0 * self.config.brake_decel),
         )
         s_lookup = s_now + brake_distance
-        return self.raceline.target_at_s(s_lookup), s_lookup
+        if self.config.horizon_behind <= 0.0:
+            return self.raceline.target_at_s(s_lookup), s_lookup
+
+        targets = [
+            self.raceline.target_at_s(s_now + brake_distance * i / (self.config.window_samples - 1))
+            for i in range(self.config.window_samples)
+        ]
+        return min(targets, key=lambda target: target.v_target_mps), s_lookup
 
 
 def clamp(value: float, lower: float, upper: float) -> float:
