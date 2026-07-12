@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .raceline import Raceline
+from .raceline import Raceline, RacelineTarget
 
 
 @dataclass(frozen=True)
@@ -61,6 +61,14 @@ class RAPP:
             config.lookahead_max,
         )
         return lookahead, lookahead_speed, lookahead_curv, kappa_window
+
+    def speed_target(self, s_now: float, v: float) -> tuple[RacelineTarget, float]:
+        brake_distance = max(
+            self.config.brake_dist_min,
+            v * v / (2.0 * self.config.brake_decel),
+        )
+        s_lookup = s_now + brake_distance
+        return self.raceline.target_at_s(s_lookup), s_lookup
 
 
 def clamp(value: float, lower: float, upper: float) -> float:
