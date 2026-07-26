@@ -1,0 +1,76 @@
+Connected to CARLA
+Client version: 0.10.0
+Server version: 0.10.0
+Current map: Carla/Maps/Town10HD_Opt
+
+First available vehicles:
+ - vehicle.taxi.ford
+ - vehicle.dodgecop.charger
+ - vehicle.ue4.chevrolet.impala
+ - vehicle.ue4.mercedes.ccc
+ - vehicle.firetruck.actors
+ - vehicle.ue4.ford.mustang
+ - vehicle.carlacola.actors
+ - vehicle.fuso.mitsubishi
+ - vehicle.ue4.bmw.grantourer
+ - vehicle.ue4.ford.crown
+
+Available cone blueprints:
+ - static.prop.trafficcone02
+ - static.prop.trafficcone01
+
+Number of spawn points: 155
+
+Vehicle spawned: vehicle.taxi.ford
+t=0.0s | x=0.00, y=0.00, yaw=0.00, v=0.00 m/s
+t=0.1s | x=106.42, y=-12.71, yaw=-89.61, v=1.11 m/s
+t=0.2s | x=106.42, y=-12.71, yaw=-89.61, v=2.23 m/s
+t=0.3s | x=106.42, y=-12.71, yaw=-89.61, v=3.07 m/s
+t=0.4s | x=106.42, y=-12.72, yaw=-89.62, v=0.78 m/s
+t=0.5s | x=106.42, y=-12.72, yaw=-89.63, v=0.38 m/s
+t=0.6s | x=106.42, y=-12.74, yaw=-89.63, v=0.24 m/s
+t=0.7s | x=106.42, y=-12.76, yaw=-89.63, v=0.18 m/s
+t=0.8s | x=106.42, y=-12.77, yaw=-89.63, v=0.21 m/s
+t=0.9s | x=106.42, y=-12.80, yaw=-89.64, v=0.25 m/s
+t=1.0s | x=106.42, y=-12.82, yaw=-89.64, v=0.27 m/s
+t=1.1s | x=106.42, y=-12.85, yaw=-89.64, v=0.30 m/s
+t=1.2s | x=106.42, y=-12.89, yaw=-89.64, v=0.34 m/s
+t=1.3s | x=106.42, y=-12.92, yaw=-89.64, v=0.37 m/s
+t=1.4s | x=106.42, y=-12.96, yaw=-89.64, v=0.40 m/s
+t=1.5s | x=106.42, y=-13.00, yaw=-89.64, v=0.43 m/s
+t=1.6s | x=106.42, y=-13.05, yaw=-89.64, v=0.47 m/s
+t=1.7s | x=106.42, y=-13.09, yaw=-89.64, v=0.50 m/s
+t=1.8s | x=106.42, y=-13.15, yaw=-89.65, v=0.53 m/s
+t=1.9s | x=106.42, y=-13.20, yaw=-89.65, v=0.56 m/s
+t=2.0s | x=106.42, y=-13.25, yaw=-89.65, v=0.59 m/s
+t=2.1s | x=106.42, y=-13.32, yaw=-89.65, v=0.63 m/s
+t=2.2s | x=106.42, y=-13.40, yaw=-89.65, v=0.67 m/s
+t=2.3s | x=106.42, y=-13.46, yaw=-89.65, v=0.69 m/s
+t=2.4s | x=106.42, y=-13.52, yaw=-89.66, v=0.72 m/s
+t=2.5s | x=106.42, y=-13.60, yaw=-89.66, v=0.76 m/s
+t=2.6s | x=106.42, y=-13.67, yaw=-89.66, v=0.79 m/s
+t=2.7s | x=106.42, y=-13.77, yaw=-89.66, v=0.83 m/s
+t=2.8s | x=106.42, y=-13.84, yaw=-89.66, v=0.85 m/s
+t=2.9s | x=106.42, y=-13.94, yaw=-89.66, v=0.89 m/s
+t=3.0s | x=106.42, y=-14.02, yaw=-89.67, v=0.92 m/s
+t=3.1s | x=106.43, y=-14.11, yaw=-89.67, v=0.95 m/s
+t=3.2s | x=106.43, y=-14.22, yaw=-89.67, v=0.99 m/s
+t=3.3s | x=106.43, y=-14.31, yaw=-89.67, v=1.01 m/s
+t=3.4s | x=106.43, y=-14.43, yaw=-89.67, v=1.05 m/s
+t=3.5s | x=106.43, y=-14.52, yaw=-89.67, v=1.08 m/s
+t=3.6s | x=106.43, y=-14.64, yaw=-89.67, v=1.11 m/s
+t=3.7s | x=106.43, y=-14.74, yaw=-89.68, v=1.14 m/s
+t=3.8s | x=106.43, y=-14.88, yaw=-89.68, v=1.18 m/s
+t=3.9s | x=106.43, y=-14.98, yaw=-89.68, v=1.21 m/s
+t=4.0s | x=106.43, y=-15.09, yaw=-89.68, v=1.23 m/s
+t=4.1s | x=106.43, y=-15.24, yaw=-89.68, v=1.27 m/s
+t=4.2s | x=106.43, y=-15.34, yaw=-89.68, v=1.30 m/s
+t=4.3s | x=106.43, y=-15.50, yaw=-89.69, v=1.33 m/s
+t=4.4s | x=106.43, y=-15.61, yaw=-89.69, v=1.36 m/s
+t=4.5s | x=106.44, y=-15.77, yaw=-89.69, v=1.40 m/s
+t=4.6s | x=106.44, y=-15.89, yaw=-89.69, v=1.42 m/s
+t=4.7s | x=106.44, y=-16.06, yaw=-89.69, v=1.46 m/s
+t=4.8s | x=106.44, y=-16.19, yaw=-89.69, v=1.49 m/s
+t=4.9s | x=106.44, y=-16.36, yaw=-89.69, v=1.52 m/s
+Vehicle destroyed cleanly.
+Done.

@@ -1,0 +1,14 @@
+Connected to CARLA
+Client version: 0.10.0
+Server version: 0.10.0
+Current map: <custom Unreal level / no OpenDRIVE map available>
+Map warning: std::exception
+Generated cone layout:
+  left cones: 441
+  right cones: 441
+Track bounds: x=[-23.7, 171.2], y=[-1.5, 197.5]
+Spawning 441 left cones using static.prop.wemas_small_blue
+Spawning 441 right cones using static.prop.wemas_small_yellow
+Actually spawned actors: 882
+Look at CARLA now. Press Enter here to destroy the cones and exit...Destroying spawned cones...
+Done.
