@@ -30,15 +30,17 @@ def main() -> None:
     print("Drawing raceline with", len(x), "points")
 
     # Green raceline
-    for i in range(len(x) - 1):
-        world.debug.draw_line(
-            carla.Location(x=float(x[i]), y=float(y[i]), z=z),
-            carla.Location(x=float(x[i + 1]), y=float(y[i + 1]), z=z),
-            thickness=0.08,
-            color=carla.Color(0, 255, 0),
-            life_time=life,
-            persistent_lines=True,
-        )
+    for i in range(len(x)):
+    	j = (i + 1) % len(x)
+
+    	world.debug.draw_line(
+        	carla.Location(x=float(x[i]), y=float(y[i]), z=z),
+        	carla.Location(x=float(x[j]), y=float(y[j]), z=z),
+        	thickness=0.08,
+        	color=carla.Color(0, 255, 0),
+        	life_time=life,
+        	persistent_lines=True,
+    )
 
     # Big start marker
     world.debug.draw_point(

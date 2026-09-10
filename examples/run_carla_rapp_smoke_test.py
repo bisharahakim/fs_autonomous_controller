@@ -204,7 +204,7 @@ def main() -> None:
 
     print("Logging to:", log_path)
 
-    max_time_s = 30.0
+    max_time_s = 135.0
     dt_s = 0.05
     max_throttle = 0.45
 
