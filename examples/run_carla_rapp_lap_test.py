@@ -36,7 +36,7 @@ def main() -> None:
     raceline = load_raceline(RACELINE_PATH)
     print("Loaded raceline points:", len(raceline.s_m))
 
-    config = RAPPConfig()
+    config = RAPPConfig(wheelbase_m=2.51)
     rapp = RAPP(raceline, config)
 
     vehicle = spawn_ego_at_raceline_start(world, raceline)
@@ -49,7 +49,7 @@ def main() -> None:
 
     dt_s = 0.05
     max_time_s = 180.0
-    max_throttle = 0.45
+    max_throttle = 0.75
 
     total_points = len(raceline.s_m)
     end_zone_index = int(0.85 * total_points)

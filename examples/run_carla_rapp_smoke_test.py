@@ -164,7 +164,7 @@ def translate_rapp_to_carla_control(
     speed_error = cmd.target_speed - current_speed
 
     if speed_error >= 0.0:
-        throttle = clamp(0.06 * speed_error + 0.04 * max(cmd.target_accel, 0.0), 0.0, max_throttle)
+        throttle = clamp(0.50 * speed_error + 0.04 * max(cmd.target_accel, 0.0), 0.0, max_throttle)
         brake = 0.0
     else:
         throttle = 0.0
