@@ -1,20 +1,13 @@
-from __future__ import annotations
-
-import sys
 from pathlib import Path
-
-import carla
 import numpy as np
+import carla
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
-
-
 RACELINE_PATH = PROJECT_ROOT / "inputs/racelines/hockenheim_fsg_benjamin24_safe.csv"
 
 
-def main() -> None:
+def main():
     client = carla.Client("localhost", 2000)
     client.set_timeout(10.0)
     world = client.get_world()
@@ -22,55 +15,53 @@ def main() -> None:
     data = np.loadtxt(RACELINE_PATH, delimiter=";", comments="#")
 
     x = data[:, 1]
-    y = -data[:, 2]
+    y = -data[:, 2]   # CARLA world is mirrored in Y
 
-    life = 100000.0
-    z = 0.08
+    z = 0.35
+    step = 2          # draw fewer segments so Unreal does not drop parts
 
-    print("Drawing raceline with", len(x), "points")
+    green = carla.Color(r=0, g=255, b=0)
+    red = carla.Color(r=255, g=0, b=0)
 
-    # Green raceline
-    for i in range(len(x)):
-    	j = (i + 1) % len(x)
+    print(f"Raceline points in CSV: {len(x)}")
+    print(f"Drawing every {step} points")
+    print("This should show the full loop without missing sections.")
 
-    	world.debug.draw_line(
-        	carla.Location(x=float(x[i]), y=float(y[i]), z=z),
-        	carla.Location(x=float(x[j]), y=float(y[j]), z=z),
-        	thickness=0.08,
-        	color=carla.Color(0, 255, 0),
-        	life_time=life,
-        	persistent_lines=True,
-    )
+    indices = list(range(0, len(x), step))
 
-    # Big start marker
-    world.debug.draw_point(
-        carla.Location(x=float(x[0]), y=float(y[0]), z=1.0),
-        size=0.35,
-        color=carla.Color(255, 0, 0),
-        life_time=life,
-        persistent_lines=True,
-    )
+    # Make sure the final CSV point is included
+    if indices[-1] != len(x) - 1:
+        indices.append(len(x) - 1)
 
-    world.debug.draw_string(
-        carla.Location(x=float(x[0]), y=float(y[0]), z=2.0),
-        "RACELINE START",
-        draw_shadow=True,
-        color=carla.Color(255, 0, 0),
-        life_time=life,
-        persistent_lines=True,
-    )
+    # Draw loop through downsampled points
+    for k in range(len(indices)):
+        i = indices[k]
+        j = indices[(k + 1) % len(indices)]
 
-    # Direction dots every 100 points
-    for i in range(0, len(x), 100):
-        world.debug.draw_point(
-            carla.Location(x=float(x[i]), y=float(y[i]), z=0.5),
-            size=0.18,
-            color=carla.Color(0, 255, 255),
-            life_time=life,
+        p1 = carla.Location(x=float(x[i]), y=float(y[i]), z=z)
+        p2 = carla.Location(x=float(x[j]), y=float(y[j]), z=z)
+
+        world.debug.draw_line(
+            p1,
+            p2,
+            thickness=0.09,
+            color=green,
+            life_time=999999.0,
             persistent_lines=True,
         )
 
-    print("Done. Green = raceline, red = start, cyan = direction samples.")
+    # Draw start point in red
+    start = carla.Location(x=float(x[0]), y=float(y[0]), z=z + 0.15)
+    world.debug.draw_point(
+        start,
+        size=0.30,
+        color=red,
+        life_time=999999.0,
+        persistent_lines=True,
+    )
+
+    print(f"Drawn segments: {len(indices)}")
+    print("Done. Green = full downsampled raceline, red = start/finish.")
 
 
 if __name__ == "__main__":

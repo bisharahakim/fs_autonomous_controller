@@ -168,7 +168,7 @@ def translate_rapp_to_carla_control(
         brake = 0.0
     else:
         throttle = 0.0
-        brake = clamp(-0.15 * speed_error, 0.0, 0.8)
+        brake = clamp(-0.06 * speed_error, 0.0, 0.8)
 
     return carla.VehicleControl(
         throttle=throttle,
