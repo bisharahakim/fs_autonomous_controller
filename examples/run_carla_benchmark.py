@@ -248,6 +248,53 @@ class CarlaPlant:
     def step(self) -> None:
         self._advance(1)
 
+    def draw_lookahead(self, overlay: dict) -> None:
+        """Draw the lookahead ABOVE the car (see lookahead_overlay).
+
+        It has to be raised: with a 2-3 m lookahead the target point is under or just
+        ahead of the 4.2 m long car, so anything on the ground is hidden from a chase
+        camera by the car body.
+        """
+        carla = self._carla
+        debug = self.world.debug
+        # Slightly longer than one step. A lifetime shorter than the step expires before
+        # the frame is rendered and nothing shows.
+        life = 1.5 * self.dt_s
+        top = 2.3                       # metres above the ground: clear of the roof
+
+        def loc(point, height):
+            return carla.Location(x=float(point[0]), y=-float(point[1]), z=height)
+
+        r, g, b = overlay["color"]
+        color = carla.Color(r, g, b)
+        white = carla.Color(255, 255, 255)
+        grey = carla.Color(170, 170, 170)
+
+        # Raised ribbon following the raceline: its length IS the lookahead distance.
+        path = overlay["path"]
+        for start, end in zip(path[:-1], path[1:]):
+            debug.draw_line(loc(start, top), loc(end, top), thickness=0.12, color=color, life_time=life)
+        # A white dot per metre along the ribbon.
+        for point in overlay["ticks"]:
+            debug.draw_point(loc(point, top + 0.02), size=0.14, color=white, life_time=life)
+        # Posts at the shortest and longest lookahead the controller may use.
+        for point in overlay["limits"]:
+            debug.draw_line(loc(point, 0.0), loc(point, top + 0.5), thickness=0.04, color=grey, life_time=life)
+        # Target point: a post from the ground up to the ribbon, and a ring on the ground.
+        target = overlay["target"]
+        debug.draw_line(loc(target, 0.0), loc(target, top), thickness=0.08, color=color, life_time=life)
+        debug.draw_point(loc(target, top), size=0.22, color=color, life_time=life)
+        ring = overlay["ring"]
+        for start, end in zip(ring, ring[1:] + ring[:1]):
+            debug.draw_line(loc(start, 0.08), loc(end, 0.08), thickness=0.06, color=color, life_time=life)
+        # Text persists longer than lines in CARLA, so refresh it a few times a second
+        # only; drawing it every step stacks several copies on top of each other.
+        self._label_countdown = getattr(self, "_label_countdown", 0) - 1
+        if self._label_countdown <= 0:
+            self._label_countdown = max(1, int(round(0.3 / self.dt_s)))
+            debug.draw_string(loc(target, top + 0.6), overlay["label"], draw_shadow=True,
+                              color=color, life_time=0.3)
+
     def stop_vehicle(self, keep: bool) -> None:
         if self.vehicle is None:
             return
@@ -314,6 +361,9 @@ class KinematicPlant:
     def mark_end(self) -> None:
         pass
 
+    def draw_lookahead(self, *args) -> None:
+        pass
+
     def collision_summary(self) -> dict:
         return {"sim_cones_hit": None, "sim_collision_events": None}
 
@@ -325,6 +375,57 @@ class KinematicPlant:
 
 
 # --------------------------------------------------------------------------
+
+LOOKAHEAD_COLORS = {
+    "speed": (0, 200, 255),       # cyan: speed is setting the lookahead
+    "curvature": (255, 120, 0),   # orange: a corner is shortening it
+    "fixed": (255, 255, 255),     # white: fixed lookahead (Pure Pursuit)
+}
+
+
+def lookahead_overlay(raceline: Raceline, lat, controller) -> dict:
+    """Geometry, in track coordinates, for showing the lookahead on the ground."""
+    s_now = float(raceline.s_m[lat.nearest_index])
+    lookahead = max(lat.lookahead_m, 0.5)
+    samples = max(2, int(math.ceil(lookahead / 0.5)) + 1)
+    path = []
+    for i in range(samples):
+        point = raceline.target_at_s(s_now + lookahead * i / (samples - 1))
+        path.append((point.x_m, point.y_m))
+
+    def on_line(distance_m: float):
+        point = raceline.target_at_s(s_now + distance_m)
+        return (point.x_m, point.y_m)
+
+    ticks = [on_line(metre) for metre in range(1, int(lookahead) + 1)]
+
+    limits = []
+    config = getattr(controller, "config", None)
+    if controller.name == "rapp":
+        limits = [on_line(config.lookahead_min), on_line(config.lookahead_max)]
+
+    target = (lat.target_x, lat.target_y)
+    ring = [
+        (target[0] + 0.45 * math.cos(2.0 * math.pi * k / 16), target[1] + 0.45 * math.sin(2.0 * math.pi * k / 16))
+        for k in range(16)
+    ]
+
+    term = lat.lookahead_mode.split(",")[0]
+    reason = {"speed": "speed", "curvature": "corner", "fixed": "fixed"}.get(term, term)
+    if "floor" in lat.lookahead_mode:
+        reason += ", at min"
+    elif "ceiling" in lat.lookahead_mode:
+        reason += ", at max"
+    return {
+        "path": path,
+        "ticks": ticks,
+        "limits": limits,
+        "target": target,
+        "ring": ring,
+        "label": f"{lat.lookahead_m:.1f} m  [{reason}]",
+        "color": LOOKAHEAD_COLORS.get(term, (255, 255, 255)),
+    }
+
 
 def build_controller(args, raceline: Raceline):
     if args.controller == "rapp":
@@ -433,6 +534,8 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
             target_speed = ref.v_target_mps * args.speed_scale
             target_accel = ref.a_target_mps2 * args.speed_scale**2
             lon = velocity_pid.update(target_speed, target_accel, v, dt)
+            if args.draw:
+                plant.draw_lookahead(lookahead_overlay(raceline, lat, controller))
             pending.append((lat.steering, lon.throttle, lon.brake))
             steer_norm = plant.apply(*pending.popleft())
 
@@ -452,7 +555,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
             if step % int(round(1.0 / dt)) == 0:
                 print(
                     f"t={t:6.2f}s | idx={lat.nearest_index:4d}/{total_points} | v={v:5.2f} "
-                    f"(ref {target_speed:5.2f}) | xte={lat.cross_track_m:+.2f} m | "
+                    f"(ref {target_speed:5.2f}) | L={lat.lookahead_m:3.1f} m | xte={lat.cross_track_m:+.2f} m | "
                     f"steer={steer_norm:+.2f} thr={lon.throttle:.2f} brk={lon.brake:.2f}"
                 )
 
@@ -487,7 +590,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "dt_s": dt,
         "wheelbase_m": WHEELBASE_M,
         "max_steer_rad": MAX_STEER_RAD,
-        "raceline": RACELINE_PATH.name,
+        "raceline": args.raceline.name,
         "status": status,
         "lap_time_s": lap_time,
         "elapsed_s": round(t, 3),
@@ -538,6 +641,10 @@ def main() -> None:
     p.add_argument("--no-sync", action="store_true", help="Do not switch CARLA to synchronous mode.")
     p.add_argument("--realtime", action="store_true", help="Pace synchronous ticks to wall-clock (for watching/recording).")
     p.add_argument("--keep-ego", action="store_true", help="Leave the car in the world after the run.")
+    p.add_argument("--draw", action="store_true",
+                   help="Draw the lookahead on the track (ribbon, metre marks, target, distance). Use with --realtime.")
+    p.add_argument("--raceline", type=Path, default=RACELINE_PATH,
+                   help="Raceline CSV to follow (default: the original Hockenheim line).")
     p.add_argument("--host", default="localhost")
     p.add_argument("--port", type=int, default=2000)
     p.add_argument("--restore-async", action="store_true", help="Only switch CARLA back to async mode, then exit.")
@@ -565,7 +672,7 @@ def main() -> None:
         restore_async(args.host, args.port)
         return
 
-    raceline = load_raceline(RACELINE_PATH)
+    raceline = load_raceline(args.raceline)
     if args.plant == "carla":
         plant = CarlaPlant(args.dt, sync=not args.no_sync, host=args.host, port=args.port, realtime=args.realtime)
     else:

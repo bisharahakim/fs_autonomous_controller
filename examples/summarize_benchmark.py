@@ -34,6 +34,7 @@ CAR_LENGTH_M = 4.18      # measured from the CARLA bounding box of vehicle.ue4.a
 CAR_WIDTH_M = 1.99
 CONE_RADIUS_M = 0.20
 IGNORE_BEFORE_S = 2.0
+CONE_PENALTY_S = 2.0     # FS Rules 2026 D 10.1.7: DOO in Autocross / Trackdrive
 
 
 def load_cones(width_m: float) -> np.ndarray:
@@ -101,6 +102,22 @@ def controller_label(meta: dict) -> str:
     return name
 
 
+_RACELINE_CACHE: dict[str, np.ndarray] = {}
+
+
+def raceline_for(meta: dict, default_xy: np.ndarray) -> tuple[np.ndarray, str]:
+    """Each run is scored against the raceline it actually followed."""
+    name = meta.get("raceline")
+    if not name or name == RACELINE_PATH.name:
+        return default_xy, ""
+    path = RACELINE_PATH.parent / name
+    if not path.exists():
+        return default_xy, " line=?"
+    if name not in _RACELINE_CACHE:
+        _RACELINE_CACHE[name] = np.loadtxt(path, delimiter=";", comments="#")[:, 1:3]
+    return _RACELINE_CACHE[name], f" line={Path(name).stem[-12:]}"
+
+
 def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_dry_runs: bool) -> dict | None:
     log_path = run_dir / "run_log.csv"
     if not log_path.exists():
@@ -126,6 +143,9 @@ def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_d
             "speed_scale": 1.0,
         }
         label = "rapp (Sept, legacy)"
+    raceline_xy, line_label = raceline_for(meta, raceline_xy)
+    label += line_label
+    setting = label
     if meta.get("delay_s"):
         label += f" d={meta['delay_s']:.2f}s"
     if meta.get("plant") == "kinematic":
@@ -158,9 +178,12 @@ def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_d
     return {
         "run": run_dir.name,
         "controller": label,
+        "setting": setting,
+        "delay_s": float(meta.get("delay_s") or 0.0),
         "speed_scale": float(meta.get("speed_scale", 1.0)),
         "status": meta["status"],
         "lap_time_s": meta.get("lap_time_s"),
+        "fs_time_s": (meta["lap_time_s"] + CONE_PENALTY_S * cones_hit) if meta.get("lap_time_s") else None,
         "xte_mean_m": float(xte.mean()),
         "xte_median_m": float(np.median(xte)),
         "xte_p95_m": float(np.percentile(xte, 95)),
@@ -194,36 +217,45 @@ def main() -> None:
         raise SystemExit(f"No runs found under {args.root}")
 
     print(f"{'run':<32}{'controller':<32}{'scale':>6}{'status':>12}{'lap s':>8}"
-          f"{'xte avg':>8}{'p95':>6}{'max':>6}{'steer rate':>11}{'sat %':>6}{'v max':>6}{'clear':>7}{'geo':>4}{'sim':>4}")
+          f"{'cones':>6}{'FS time':>8}{'xte avg':>8}{'p95':>6}{'max':>6}{'steer rate':>11}{'sat %':>6}{'v max':>6}{'clear':>7}")
     for r in results:
         lap = f"{r['lap_time_s']:.2f}" if r["lap_time_s"] is not None else "-"
+        fs = f"{r['fs_time_s']:.2f}" if r["fs_time_s"] is not None else "-"
         print(f"{r['run']:<32}{r['controller']:<32}{r['speed_scale']:>6.2f}{r['status']:>12}{lap:>8}"
+              f"{r['cones_hit_geometric']:>6d}{fs:>8}"
               f"{r['xte_mean_m']:>8.2f}{r['xte_p95_m']:>6.2f}{r['xte_max_m']:>6.2f}"
               f"{r['steer_rate_rms_radps']:>11.3f}{r['steer_saturated_pct']:>6.1f}{r['v_max_mps']:>6.1f}"
-              f"{r['min_cone_clearance_m']:>7.2f}{r['cones_hit_geometric']:>4d}"
-              f"{'-' if r['cones_hit_sim'] is None else r['cones_hit_sim']:>4}")
+              f"{r['min_cone_clearance_m']:>7.2f}")
 
-    print("\ngeo = cones inside the car footprint, computed from the logged path; "
-          "sim = cones the simulator reported touched.")
-    print(f"Car footprint for geo: {CAR_LENGTH_M:.2f} x {CAR_WIDTH_M:.2f} m (CARLA bounding box of the Audi). "
-          "The cones have no collision in this level, so sim is always 0; read geo.")
-    print("\nPer controller and speed scale")
-    print(f"{'controller':<32}{'scale':>6}{'runs':>5}{'done':>5}{'lap mean':>9}{'lap std':>8}"
-          f"{'xte avg':>8}{'xte max':>8}{'steer rate':>11}{'geo hits':>9}{'sim hits':>9}")
-    groups: dict[tuple[str, float], list[dict]] = {}
-    for r in results:
-        if r["status"] != "interrupted":
-            groups.setdefault((r["controller"], r["speed_scale"]), []).append(r)
-    for (controller, scale), runs in sorted(groups.items()):
-        laps = [r["lap_time_s"] for r in runs if r["status"] == "completed"]
-        lap_mean = f"{np.mean(laps):.2f}" if laps else "-"
-        lap_std = f"{np.std(laps):.2f}" if len(laps) > 1 else "-"
-        sim = [r["cones_hit_sim"] for r in runs if r["cones_hit_sim"] is not None]
-        sim_text = f"{np.mean(sim):.1f}" if sim else "-"
-        print(f"{controller:<32}{scale:>6.2f}{len(runs):>5}{len(laps):>5}{lap_mean:>9}{lap_std:>8}"
-              f"{np.mean([r['xte_mean_m'] for r in runs]):>8.2f}{max(r['xte_max_m'] for r in runs):>8.2f}"
-              f"{np.mean([r['steer_rate_rms_radps'] for r in runs]):>11.3f}"
-              f"{np.mean([r['cones_hit_geometric'] for r in runs]):>9.1f}{sim_text:>9}")
+    print(f"\ncones = cones inside the car's outline ({CAR_LENGTH_M:.2f} x {CAR_WIDTH_M:.2f} m, CARLA's bounding box), "
+          "from the logged path.")
+    print(f"FS time = lap time + {CONE_PENALTY_S:.0f} s per cone (FS Rules 2026, D 10.1.7).")
+
+    full_speed = [r for r in results if r["speed_scale"] == 1.0 and r["status"] != "interrupted"]
+    delays = sorted({r["delay_s"] for r in full_speed})
+    if full_speed:
+        print("\nFS time in seconds (cones hit), by actuation delay, at full speed")
+        print(f"{'setting':<28}" + "".join(f"{f'delay {d:.2f} s':>18}" for d in delays) + f"{'worst':>10}")
+        table: dict[str, dict[float, dict]] = {}
+        for r in full_speed:
+            table.setdefault(r["setting"], {})[r["delay_s"]] = r   # latest run wins
+        def worst(cells: dict[float, dict]) -> float:
+            times = [c["fs_time_s"] for c in cells.values()]
+            return float("inf") if any(t is None for t in times) or len(cells) < len(delays) else max(times)
+        for setting, cells in sorted(table.items(), key=lambda kv: (worst(kv[1]), kv[0])):
+            row = f"{setting:<28}"
+            for d in delays:
+                c = cells.get(d)
+                if c is None:
+                    row += f"{'-':>18}"
+                elif c["fs_time_s"] is None:
+                    row += f"{c['status']:>18}"
+                else:
+                    row += f"{c['fs_time_s']:.1f} ({c['cones_hit_geometric']})".rjust(18)
+            w = worst(cells)
+            row += f"{'-' if w == float('inf') else format(w, '.1f'):>10}"
+            print(row)
+        print("worst = the slowest FS time across all delays; '-' where a delay was not run or the lap failed.")
 
     out_path = args.root / "benchmark_summary.csv"
     with out_path.open("w", newline="") as f:

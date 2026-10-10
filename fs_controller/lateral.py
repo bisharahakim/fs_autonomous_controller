@@ -29,6 +29,7 @@ class LateralCommand:
     target_y: float
     lookahead_m: float
     cross_track_m: float
+    lookahead_mode: str = "fixed"   # which rule set the lookahead (for display only)
 
 
 def signed_cross_track(raceline: Raceline, x: float, y: float, nearest: int) -> float:
@@ -102,7 +103,17 @@ class RAPPLateral:
             target_y=cmd.target_y,
             lookahead_m=cmd.lookahead_used,
             cross_track_m=signed_cross_track(self.raceline, x, y, cmd.nearest_index),
+            lookahead_mode=self._mode(cmd),
         )
+
+    def _mode(self, cmd) -> str:
+        term = "curvature" if cmd.lookahead_curv < cmd.lookahead_speed else "speed"
+        raw = min(cmd.lookahead_curv, cmd.lookahead_speed)
+        if raw < self.config.lookahead_min:
+            return f"{term}, at floor"
+        if raw > self.config.lookahead_max:
+            return f"{term}, at ceiling"
+        return term
 
     def params(self) -> dict:
         return {k: getattr(self.config, k) for k in self.config.__dataclass_fields__}
