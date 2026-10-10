@@ -30,7 +30,7 @@ RACELINE_PATH = PROJECT_ROOT / "inputs/racelines/hockenheim_fsg_benjamin24_safe.
 OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "carla"
 
 TRACK_WIDTH_M = 5.0      # same as spawn_hockenheim_cones_wide.py --width 5.0
-CAR_LENGTH_M = 4.18      # measured from the CARLA bounding box
+CAR_LENGTH_M = 4.18      # measured from the CARLA bounding box of vehicle.ue4.audi.tt
 CAR_WIDTH_M = 1.99
 CONE_RADIUS_M = 0.20
 IGNORE_BEFORE_S = 2.0
@@ -124,6 +124,8 @@ def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_d
             "speed_scale": 1.0,
         }
         label = "rapp (Sept, legacy)"
+    if meta.get("delay_s"):
+        label += f" d={meta['delay_s']:.2f}s"
     if meta.get("plant") == "kinematic":
         if not include_dry_runs:
             return None
@@ -189,11 +191,11 @@ def main() -> None:
     if not results:
         raise SystemExit(f"No runs found under {args.root}")
 
-    print(f"{'run':<32}{'controller':<24}{'scale':>6}{'status':>12}{'lap s':>8}"
+    print(f"{'run':<32}{'controller':<32}{'scale':>6}{'status':>12}{'lap s':>8}"
           f"{'xte avg':>8}{'p95':>6}{'max':>6}{'steer rate':>11}{'sat %':>6}{'v max':>6}{'clear':>7}{'geo':>4}{'sim':>4}")
     for r in results:
         lap = f"{r['lap_time_s']:.2f}" if r["lap_time_s"] is not None else "-"
-        print(f"{r['run']:<32}{r['controller']:<24}{r['speed_scale']:>6.2f}{r['status']:>12}{lap:>8}"
+        print(f"{r['run']:<32}{r['controller']:<32}{r['speed_scale']:>6.2f}{r['status']:>12}{lap:>8}"
               f"{r['xte_mean_m']:>8.2f}{r['xte_p95_m']:>6.2f}{r['xte_max_m']:>6.2f}"
               f"{r['steer_rate_rms_radps']:>11.3f}{r['steer_saturated_pct']:>6.1f}{r['v_max_mps']:>6.1f}"
               f"{r['min_cone_clearance_m']:>7.2f}{r['cones_hit_geometric']:>4d}"
@@ -201,11 +203,10 @@ def main() -> None:
 
     print("\ngeo = cones inside the car footprint, computed from the logged path; "
           "sim = cones the simulator reported touched.")
-    footprints = sorted({r["footprint"] for r in results})
-    print(f"Footprint used for geo: {', '.join(footprints)} "
-          "(sim = the simulator's bounding box, assumed = 4.20 x 1.85 m).")
+    print(f"Car footprint for geo: {CAR_LENGTH_M:.2f} x {CAR_WIDTH_M:.2f} m (CARLA bounding box of the Audi). "
+          "The cones have no collision in this level, so sim is always 0; read geo.")
     print("\nPer controller and speed scale")
-    print(f"{'controller':<24}{'scale':>6}{'runs':>5}{'done':>5}{'lap mean':>9}{'lap std':>8}"
+    print(f"{'controller':<32}{'scale':>6}{'runs':>5}{'done':>5}{'lap mean':>9}{'lap std':>8}"
           f"{'xte avg':>8}{'xte max':>8}{'steer rate':>11}{'geo hits':>9}{'sim hits':>9}")
     groups: dict[tuple[str, float], list[dict]] = {}
     for r in results:
@@ -217,7 +218,7 @@ def main() -> None:
         lap_std = f"{np.std(laps):.2f}" if len(laps) > 1 else "-"
         sim = [r["cones_hit_sim"] for r in runs if r["cones_hit_sim"] is not None]
         sim_text = f"{np.mean(sim):.1f}" if sim else "-"
-        print(f"{controller:<24}{scale:>6.2f}{len(runs):>5}{len(laps):>5}{lap_mean:>9}{lap_std:>8}"
+        print(f"{controller:<32}{scale:>6.2f}{len(runs):>5}{len(laps):>5}{lap_mean:>9}{lap_std:>8}"
               f"{np.mean([r['xte_mean_m'] for r in runs]):>8.2f}{max(r['xte_max_m'] for r in runs):>8.2f}"
               f"{np.mean([r['steer_rate_rms_radps'] for r in runs]):>11.3f}"
               f"{np.mean([r['cones_hit_geometric'] for r in runs]):>9.1f}{sim_text:>9}")

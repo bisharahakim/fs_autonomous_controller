@@ -23,6 +23,7 @@ If a run is killed hard and the editor freezes waiting for ticks:
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import json
 import math
@@ -393,6 +394,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "controller": args.controller,
         "controller_params": controller.params(),
         "speed_scale": args.speed_scale,
+        "delay_s": round(args.delay_steps * args.dt, 4),
         "status": "interrupted",
         "lap_time_s": None,
         **plant.info,
@@ -408,6 +410,8 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
     max_abs_xte = 0.0
 
     dt = args.dt
+    # Actuation delay: the command applied now is the one computed delay_steps ago.
+    pending = collections.deque([(0.0, 0.0, 0.0)] * args.delay_steps)
     t0 = plant.sim_time()
     step = 0
     print(f"\n[{args.controller}] run {run_index + 1}/{args.repeat} -> {log_path}")
@@ -428,7 +432,8 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
             target_speed = ref.v_target_mps * args.speed_scale
             target_accel = ref.a_target_mps2 * args.speed_scale**2
             lon = velocity_pid.update(target_speed, target_accel, v, dt)
-            steer_norm = plant.apply(lat.steering, lon.throttle, lon.brake)
+            pending.append((lat.steering, lon.throttle, lon.brake))
+            steer_norm = plant.apply(*pending.popleft())
 
             if lat.nearest_index > end_zone:
                 armed = True
@@ -476,6 +481,8 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "controller_params": controller.params(),
         "velocity_pid": velocity_pid.params(),
         "speed_scale": args.speed_scale,
+        "delay_steps": args.delay_steps,
+        "delay_s": round(args.delay_steps * dt, 4),
         "dt_s": dt,
         "wheelbase_m": WHEELBASE_M,
         "max_steer_rad": MAX_STEER_RAD,
@@ -523,6 +530,8 @@ def main() -> None:
     p.add_argument("--repeat", type=int, default=1, help="Number of consecutive laps (each from a fresh spawn).")
     p.add_argument("--speed-scale", type=float, default=1.0, help="Scale the raceline speed profile (1.0 = as planned).")
     p.add_argument("--dt", type=float, default=0.05, help="Fixed simulator timestep in seconds.")
+    p.add_argument("--delay-steps", type=int, default=0,
+                   help="Actuation delay in timesteps (3 = 0.15 s at the default dt). Same for every controller.")
     p.add_argument("--max-time", type=float, default=240.0, help="Abort a lap after this much SIMULATOR time.")
     p.add_argument("--abort-xte", type=float, default=3.5, help="Abort when |cross-track error| exceeds this (m).")
     p.add_argument("--no-sync", action="store_true", help="Do not switch CARLA to synchronous mode.")
