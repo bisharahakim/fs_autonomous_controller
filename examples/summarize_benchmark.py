@@ -145,6 +145,9 @@ def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_d
         label = "rapp (Sept, legacy)"
     raceline_xy, line_label = raceline_for(meta, raceline_xy)
     label += line_label
+    speed_ref = meta.get("speed_ref", "lookahead")
+    if speed_ref != "lookahead":
+        label += f" v={speed_ref}"
     setting = label
     if meta.get("delay_s"):
         label += f" d={meta['delay_s']:.2f}s"
@@ -216,12 +219,12 @@ def main() -> None:
     if not results:
         raise SystemExit(f"No runs found under {args.root}")
 
-    print(f"{'run':<32}{'controller':<32}{'scale':>6}{'status':>12}{'lap s':>8}"
+    print(f"{'run':<32}{'controller':<40}{'scale':>6}{'status':>12}{'lap s':>8}"
           f"{'cones':>6}{'FS time':>8}{'xte avg':>8}{'p95':>6}{'max':>6}{'steer rate':>11}{'sat %':>6}{'v max':>6}{'clear':>7}")
     for r in results:
         lap = f"{r['lap_time_s']:.2f}" if r["lap_time_s"] is not None else "-"
         fs = f"{r['fs_time_s']:.2f}" if r["fs_time_s"] is not None else "-"
-        print(f"{r['run']:<32}{r['controller']:<32}{r['speed_scale']:>6.2f}{r['status']:>12}{lap:>8}"
+        print(f"{r['run']:<32}{r['controller']:<40}{r['speed_scale']:>6.2f}{r['status']:>12}{lap:>8}"
               f"{r['cones_hit_geometric']:>6d}{fs:>8}"
               f"{r['xte_mean_m']:>8.2f}{r['xte_p95_m']:>6.2f}{r['xte_max_m']:>6.2f}"
               f"{r['steer_rate_rms_radps']:>11.3f}{r['steer_saturated_pct']:>6.1f}{r['v_max_mps']:>6.1f}"
@@ -235,7 +238,7 @@ def main() -> None:
     delays = sorted({r["delay_s"] for r in full_speed})
     if full_speed:
         print("\nFS time in seconds (cones hit), by actuation delay, at full speed")
-        print(f"{'setting':<28}" + "".join(f"{f'delay {d:.2f} s':>18}" for d in delays) + f"{'worst':>10}")
+        print(f"{'setting':<36}" + "".join(f"{f'delay {d:.2f} s':>18}" for d in delays) + f"{'worst':>10}")
         table: dict[str, dict[float, dict]] = {}
         for r in full_speed:
             table.setdefault(r["setting"], {})[r["delay_s"]] = r   # latest run wins
@@ -243,7 +246,7 @@ def main() -> None:
             times = [c["fs_time_s"] for c in cells.values()]
             return float("inf") if any(t is None for t in times) or len(cells) < len(delays) else max(times)
         for setting, cells in sorted(table.items(), key=lambda kv: (worst(kv[1]), kv[0])):
-            row = f"{setting:<28}"
+            row = f"{setting:<36}"
             for d in delays:
                 c = cells.get(d)
                 if c is None:

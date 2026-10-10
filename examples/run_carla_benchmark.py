@@ -475,11 +475,22 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
     controller = build_controller(args, raceline)
     controller.reset()
     velocity_pid = VelocityPID(
-        VelocityPIDConfig(kp=args.speed_kp, ki=args.speed_ki, kd=args.speed_kd, max_throttle=args.max_throttle)
+        VelocityPIDConfig(
+            kp=args.speed_kp, ki=args.speed_ki, kd=args.speed_kd, max_throttle=args.max_throttle,
+            brake_gain=args.brake_gain, kff_brake=args.kff_brake,
+        )
     )
-    # The speed reference is RAPP's own braking-distance lookup on the raceline.
-    # It is evaluated the same way for every controller.
-    speed_reference = RAPP(raceline, RAPPConfig(wheelbase_m=WHEELBASE_M, max_steer_rad=MAX_STEER_RAD))
+    # Speed reference (--speed-ref), chosen independently of the steering controller:
+    #   plan      = planned speed at the car's position, no anticipation
+    #   lookahead = RAPP's original rule: lowest planned speed within a braking distance
+    #   envelope  = RAPP's braking envelope: slow early enough for every corner ahead
+    speed_reference = RAPP(
+        raceline,
+        RAPPConfig(
+            wheelbase_m=WHEELBASE_M, max_steer_rad=MAX_STEER_RAD,
+            brake_decel=args.brake_decel, brake_envelope=(args.speed_ref == "envelope"),
+        ),
+    )
 
     plant.reset(raceline)
 
@@ -496,6 +507,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "controller": args.controller,
         "controller_params": controller.params(),
         "speed_scale": args.speed_scale,
+        "speed_ref": args.speed_ref,
         "delay_s": round(args.delay_steps * args.dt, 4),
         "status": "interrupted",
         "lap_time_s": None,
@@ -530,7 +542,10 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
             x, y, yaw, v, yaw_carla_deg = plant.state()
             lat = controller.compute(x, y, yaw, v, dt)
             s_now = float(raceline.s_m[lat.nearest_index])
-            ref, _ = speed_reference.speed_target(s_now, v)
+            if args.speed_ref == "plan":
+                ref = raceline.target_at_s(s_now)
+            else:
+                ref, _ = speed_reference.speed_target(s_now, v)
             target_speed = ref.v_target_mps * args.speed_scale
             target_accel = ref.a_target_mps2 * args.speed_scale**2
             lon = velocity_pid.update(target_speed, target_accel, v, dt)
@@ -585,6 +600,8 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "controller_params": controller.params(),
         "velocity_pid": velocity_pid.params(),
         "speed_scale": args.speed_scale,
+        "speed_ref": args.speed_ref,
+        "brake_decel": args.brake_decel,
         "delay_steps": args.delay_steps,
         "delay_s": round(args.delay_steps * dt, 4),
         "dt_s": dt,
@@ -666,7 +683,25 @@ def main() -> None:
     g.add_argument("--speed-ki", type=float, default=VelocityPIDConfig.ki)
     g.add_argument("--speed-kd", type=float, default=VelocityPIDConfig.kd)
     g.add_argument("--max-throttle", type=float, default=VelocityPIDConfig.max_throttle)
+    g = p.add_argument_group("speed target and braking (independent of the steering controller)")
+    g.add_argument("--speed-ref", choices=("plan", "lookahead", "envelope"), default="lookahead",
+                   help="plan: planned speed here, no anticipation. lookahead: original RAPP rule. "
+                        "envelope: brake early enough for every corner ahead.")
+    g.add_argument("--brake-decel", type=float, default=None,
+                   help="Deceleration the speed target assumes (m/s^2). Default 8.0, or 5.0 with envelope.")
+    g.add_argument("--brake-gain", type=float, default=None,
+                   help="Brake per unit of negative controller output. Default 0.12, or 0.30 with envelope.")
+    g.add_argument("--kff-brake", type=float, default=None,
+                   help="Brake feed-forward per m/s^2 of requested deceleration. Default 0, or 0.05 with envelope.")
     args = p.parse_args()
+
+    envelope = args.speed_ref == "envelope"
+    if args.brake_decel is None:
+        args.brake_decel = 5.0 if envelope else RAPPConfig.brake_decel
+    if args.brake_gain is None:
+        args.brake_gain = 0.30 if envelope else VelocityPIDConfig.brake_gain
+    if args.kff_brake is None:
+        args.kff_brake = 0.05 if envelope else VelocityPIDConfig.kff_brake
 
     if args.restore_async:
         restore_async(args.host, args.port)

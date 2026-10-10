@@ -19,6 +19,7 @@ class VelocityPIDConfig:
     ki: float = 0.05
     kd: float = 0.0
     kff_accel: float = 0.04
+    kff_brake: float = 0.0         # brake command per m/s^2 of requested deceleration
     integral_limit: float = 0.15   # largest actuator fraction the I term may add
     brake_gain: float = 0.12       # brake = -u * brake_gain  (0.50 * 0.12 = 0.06)
     max_throttle: float = 0.75
@@ -62,6 +63,8 @@ class VelocityPID:
             + c.ki * self._integral
             + c.kd * derivative
             + c.kff_accel * max(target_accel, 0.0)
+            # Braking feed-forward, converted so it comes out as kff_brake * decel of brake.
+            - c.kff_brake * max(-target_accel, 0.0) / c.brake_gain
         )
 
         if raw >= 0.0:

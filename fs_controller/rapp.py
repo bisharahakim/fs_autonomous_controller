@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 from .raceline import Raceline, RacelineTarget
@@ -21,6 +21,9 @@ class RAPPConfig:
     # Scales the curvature limit on the lookahead: lookahead <= curv_gain * corner radius.
     # 1.0 is the original behaviour. Values below 1 shorten the lookahead earlier in corners.
     curv_gain: float = 1.0
+    # Speed target as a braking envelope: the highest speed from which the car can
+    # still slow to EVERY upcoming planned speed at brake_decel. False = original rule.
+    brake_envelope: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,8 @@ class RAPP:
             v * v / (2.0 * self.config.brake_decel),
         )
         s_lookup = s_now + brake_distance
+        if self.config.brake_envelope:
+            return self._envelope_target(s_now, v), s_lookup
         if self.config.horizon_behind <= 0.0:
             return self.raceline.target_at_s(s_lookup), s_lookup
 
@@ -118,6 +123,33 @@ class RAPP:
             for i in range(self.config.window_samples)
         ]
         return min(targets, key=lambda target: target.v_target_mps), s_lookup
+
+
+    def _envelope_target(self, s_now: float, v: float) -> RacelineTarget:
+        """Anticipate corners: v_ref = min over the road ahead of
+        sqrt(v_plan(s')^2 + 2 * brake_decel * (s' - s)).
+
+        A corner d metres ahead with planned speed v_c allows at most
+        sqrt(v_c^2 + 2*a*d) now. Taking the minimum over everything ahead makes the
+        target start falling early enough to reach each corner at its planned speed
+        using no more than brake_decel.
+        """
+        decel = self.config.brake_decel
+        here = self.raceline.target_at_s(s_now)
+        # Nothing farther than this can limit the speed, whichever is larger.
+        horizon = max(self.config.brake_dist_min, max(v, here.v_target_mps) ** 2 / (2.0 * decel))
+        steps = max(2, int(horizon) + 1)          # about one sample per metre
+        allowed = here.v_target_mps
+        limited_by_corner = False
+        for i in range(1, steps + 1):
+            distance = horizon * i / steps
+            ahead = self.raceline.target_at_s(s_now + distance)
+            candidate = math.sqrt(ahead.v_target_mps ** 2 + 2.0 * decel * distance)
+            if candidate < allowed:
+                allowed = candidate
+                limited_by_corner = True
+        accel = -decel if limited_by_corner else here.a_target_mps2
+        return replace(here, v_target_mps=allowed, a_target_mps2=accel)
 
 
 def clamp(value: float, lower: float, upper: float) -> float:
