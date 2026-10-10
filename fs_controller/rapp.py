@@ -18,6 +18,9 @@ class RAPPConfig:
     wheelbase_m: float = 1.55
     max_steer_rad: float = 0.5
     window_samples: int = 20
+    # Scales the curvature limit on the lookahead: lookahead <= curv_gain * corner radius.
+    # 1.0 is the original behaviour. Values below 1 shorten the lookahead earlier in corners.
+    curv_gain: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -93,7 +96,7 @@ class RAPP:
         ]
         kappa_window = max(abs(self.raceline.kappa_at(s)) for s in s_samples)
         lookahead_speed = v * config.speed_gain
-        lookahead_curv = 1.0 / max(kappa_window, 1e-3)
+        lookahead_curv = config.curv_gain / max(kappa_window, 1e-3)
         lookahead = clamp(
             min(lookahead_speed, lookahead_curv),
             config.lookahead_min,

@@ -92,8 +92,10 @@ def controller_label(meta: dict) -> str:
         gain = params.get("lookahead_gain_s", 0.0)
         return f"pp L={params.get('lookahead_m', '?')}" + (f"+{gain}v" if gain else "")
     if name == "rapp":
+        curv = params.get("curv_gain", 1.0)
         return (f"rapp g={params.get('speed_gain', '?')} "
-                f"[{params.get('lookahead_min', '?')},{params.get('lookahead_max', '?')}]")
+                f"[{params.get('lookahead_min', '?')},{params.get('lookahead_max', '?')}]"
+                + (f" c={curv}" if curv != 1.0 else ""))
     if name == "pid":
         return f"pid {params.get('kp', '?')}/{params.get('ki', '?')}/{params.get('kd', '?')}"
     return name

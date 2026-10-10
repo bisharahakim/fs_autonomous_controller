@@ -1,0 +1,48 @@
+{
+  "controller": "pid",
+  "controller_params": {
+    "kp": 0.5,
+    "ki": 0.02,
+    "kd": 0.15,
+    "max_steer_rad": 0.5,
+    "integral_limit_rad": 0.15,
+    "derivative_tau_s": 0.1
+  },
+  "velocity_pid": {
+    "kp": 0.5,
+    "ki": 0.05,
+    "kd": 0.0,
+    "kff_accel": 0.04,
+    "integral_limit": 0.15,
+    "brake_gain": 0.12,
+    "max_throttle": 0.75,
+    "max_brake": 0.8
+  },
+  "speed_scale": 1.0,
+  "dt_s": 0.05,
+  "wheelbase_m": 2.51,
+  "max_steer_rad": 0.5,
+  "raceline": "hockenheim_fsg_benjamin24_safe.csv",
+  "status": "completed",
+  "lap_time_s": 105.1500015668571,
+  "elapsed_s": 105.15,
+  "steps": 2103,
+  "max_abs_xte_m": 1.1072,
+  "git_commit": "3500ab5",
+  "timestamp": "20261010_180959",
+  "sim_cones_hit": 0,
+  "sim_collision_events": 0,
+  "sim_collision_types": {},
+  "plant": "carla",
+  "client_version": "0.10.0",
+  "server_version": "0.10.0",
+  "vehicle": "vehicle.ue4.audi.tt",
+  "sync": true,
+  "wheel_max_steer_angle_deg": [
+    70.0,
+    70.0,
+    0.0,
+    0.0
+  ],
+  "collision_sensor": true
+}
