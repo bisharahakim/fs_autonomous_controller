@@ -620,8 +620,8 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
-    hits = collisions["sim_cones_hit"]
-    hit_text = "cone contacts not measured" if hits is None else f"{hits} cones touched"
+    # Cones in this level have no collision, so the simulator cannot count contacts.
+    hit_text = "cones: run summarize_benchmark.py"
     if status == "completed":
         print(f"RESULT [{args.controller}]: lap completed in {lap_time:.2f} s "
               f"(max |xte| {max_abs_xte:.2f} m, {hit_text})")
