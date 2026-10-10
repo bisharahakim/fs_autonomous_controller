@@ -149,6 +149,8 @@ def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_d
     speed_ref = meta.get("speed_ref", "lookahead")
     if speed_ref != "lookahead":
         label += f" v={speed_ref}"
+    if meta.get("predict_delay"):
+        label += " +predict"
     setting = label
     if meta.get("delay_s"):
         label += f" d={meta['delay_s']:.2f}s"

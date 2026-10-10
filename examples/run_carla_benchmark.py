@@ -42,6 +42,7 @@ from fs_controller.lateral import (  # noqa: E402
     PurePursuitLateral,
     PurePursuitLateralConfig,
     RAPPLateral,
+    signed_cross_track,
 )
 from fs_controller.raceline import Raceline, load_raceline  # noqa: E402
 from fs_controller.rapp import RAPP, RAPPConfig  # noqa: E402
@@ -376,6 +377,27 @@ class KinematicPlant:
 
 # --------------------------------------------------------------------------
 
+# Road-wheel angle the Audi actually produces per radian commanded, measured from
+# benchmark logs (yaw rate against steering at 4 to 9 m/s). Used only for prediction.
+PREDICT_STEER_GAIN = 0.86
+
+
+def predict_pose(x: float, y: float, yaw: float, v: float, pending, dt: float):
+    """Delay compensation: where the car will be when a command computed now takes effect.
+
+    The commands already sent but not yet applied are known exactly, so the pose is
+    advanced through them with a bicycle model (speed held constant over the delay).
+    The controller then steers from that predicted pose instead of the current one.
+    """
+    for steering, _, _ in pending:
+        delta = clamp(steering, -MAX_STEER_RAD, MAX_STEER_RAD) * PREDICT_STEER_GAIN
+        beta = math.atan(0.5 * math.tan(delta))
+        x += v * math.cos(yaw + beta) * dt
+        y += v * math.sin(yaw + beta) * dt
+        yaw += v / WHEELBASE_M * math.cos(beta) * math.tan(delta) * dt
+    return x, y, yaw
+
+
 LOOKAHEAD_COLORS = {
     "speed": (0, 200, 255),       # cyan: speed is setting the lookahead
     "curvature": (255, 120, 0),   # orange: a corner is shortening it
@@ -510,6 +532,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "speed_scale": args.speed_scale,
         "speed_ref": args.speed_ref,
         "delay_s": round(args.delay_steps * args.dt, 4),
+        "predict_delay": bool(args.predict_delay),
         "status": "interrupted",
         "lap_time_s": None,
         **plant.info,
@@ -541,7 +564,13 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
                 break
 
             x, y, yaw, v, yaw_carla_deg = plant.state()
-            lat = controller.compute(x, y, yaw, v, dt)
+            if args.predict_delay and pending:
+                px, py, pyaw = predict_pose(x, y, yaw, v, pending, dt)
+                lat = controller.compute(px, py, pyaw, v, dt)
+                actual_xte = signed_cross_track(raceline, x, y, raceline.nearest_index(x, y))
+            else:
+                lat = controller.compute(x, y, yaw, v, dt)
+                actual_xte = lat.cross_track_m
             s_now = float(raceline.s_m[lat.nearest_index])
             if args.speed_ref == "plan":
                 ref = raceline.target_at_s(s_now)
@@ -558,27 +587,27 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
             if lat.nearest_index > end_zone:
                 armed = True
             lap_done = armed and lat.nearest_index < start_zone and t > 20.0
-            max_abs_xte = max(max_abs_xte, abs(lat.cross_track_m))
+            max_abs_xte = max(max_abs_xte, abs(actual_xte))
 
             writer.writerow([
                 f"{t:.3f}", f"{x:.6f}", f"{y:.6f}", f"{yaw_carla_deg:.6f}", f"{yaw:.6f}", f"{v:.6f}",
                 f"{lat.steering:.6f}", f"{steer_norm:.6f}", f"{target_speed:.6f}", f"{target_accel:.6f}",
                 f"{lon.throttle:.6f}", f"{lon.brake:.6f}", lat.nearest_index, lat.target_index,
                 f"{lat.target_x:.6f}", f"{lat.target_y:.6f}", int(lap_done),
-                f"{s_now:.3f}", f"{lat.cross_track_m:.6f}", f"{lat.lookahead_m:.3f}",
+                f"{s_now:.3f}", f"{actual_xte:.6f}", f"{lat.lookahead_m:.3f}",
             ])
 
             if step % int(round(1.0 / dt)) == 0:
                 print(
                     f"t={t:6.2f}s | idx={lat.nearest_index:4d}/{total_points} | v={v:5.2f} "
-                    f"(ref {target_speed:5.2f}) | L={lat.lookahead_m:3.1f} m | xte={lat.cross_track_m:+.2f} m | "
+                    f"(ref {target_speed:5.2f}) | L={lat.lookahead_m:3.1f} m | xte={actual_xte:+.2f} m | "
                     f"steer={steer_norm:+.2f} thr={lon.throttle:.2f} brk={lon.brake:.2f}"
                 )
 
             if lap_done:
                 status, lap_time = "completed", t
                 break
-            if abs(lat.cross_track_m) > args.abort_xte:
+            if abs(actual_xte) > args.abort_xte:
                 status = "off_track"
                 break
             if t > 5.0 and v < 0.5:
@@ -605,6 +634,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "brake_decel": args.brake_decel,
         "delay_steps": args.delay_steps,
         "delay_s": round(args.delay_steps * dt, 4),
+        "predict_delay": bool(args.predict_delay),
         "dt_s": dt,
         "wheelbase_m": WHEELBASE_M,
         "max_steer_rad": MAX_STEER_RAD,
@@ -656,6 +686,9 @@ def main() -> None:
                    help="Actuation delay in timesteps (3 = 0.15 s at the default dt). Same for every controller.")
     p.add_argument("--max-time", type=float, default=240.0, help="Abort a lap after this much SIMULATOR time.")
     p.add_argument("--abort-xte", type=float, default=3.5, help="Abort when |cross-track error| exceeds this (m).")
+    p.add_argument("--predict-delay", action="store_true",
+                   help="Delay compensation: steer from the pose predicted through the pending commands. "
+                        "Works with any controller.")
     p.add_argument("--no-sync", action="store_true", help="Do not switch CARLA to synchronous mode.")
     p.add_argument("--realtime", action="store_true", help="Pace synchronous ticks to wall-clock (for watching/recording).")
     p.add_argument("--keep-ego", action="store_true", help="Leave the car in the world after the run.")
