@@ -21,6 +21,9 @@ class RAPPConfig:
     # Scales the curvature limit on the lookahead: lookahead <= curv_gain * corner radius.
     # 1.0 is the original behaviour. Values below 1 shorten the lookahead earlier in corners.
     curv_gain: float = 1.0
+    # Known actuation delay (s). The car travels v * delay before a command takes
+    # effect, so that distance is added to the lookahead. 0 = original behaviour.
+    delay_comp_s: float = 0.0
     # Speed target as a braking envelope: the highest speed from which the car can
     # still slow to EVERY upcoming planned speed at brake_decel. False = original rule.
     brake_envelope: bool = False
@@ -105,6 +108,7 @@ class RAPP:
             config.lookahead_min,
             config.lookahead_max,
         )
+        lookahead += max(v, 0.0) * config.delay_comp_s
         return lookahead, lookahead_speed, lookahead_curv, kappa_window
 
     def speed_target(self, s_now: float, v: float) -> tuple[RacelineTarget, float]:

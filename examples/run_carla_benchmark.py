@@ -438,6 +438,7 @@ def build_controller(args, raceline: Raceline):
                 lookahead_min=args.rapp_lookahead_min,
                 lookahead_max=args.rapp_lookahead_max,
                 curv_gain=args.rapp_curv_gain,
+                delay_comp_s=args.rapp_delay_comp,
             ),
         )
     if args.controller == "pp":
@@ -671,6 +672,8 @@ def main() -> None:
     g.add_argument("--rapp-lookahead-max", type=float, default=RAPPConfig.lookahead_max)
     g.add_argument("--rapp-curv-gain", type=float, default=RAPPConfig.curv_gain,
                    help="Lookahead <= this * corner radius. 1.0 = original RAPP.")
+    g.add_argument("--rapp-delay-comp", type=float, default=RAPPConfig.delay_comp_s,
+                   help="Actuation delay RAPP is designed for (s). Adds speed * delay to the lookahead.")
     g = p.add_argument_group("pure pursuit")
     g.add_argument("--pp-lookahead", type=float, default=PurePursuitLateralConfig.lookahead_m)
     g.add_argument("--pp-gain", type=float, default=PurePursuitLateralConfig.lookahead_gain_s)

@@ -96,7 +96,8 @@ def controller_label(meta: dict) -> str:
         curv = params.get("curv_gain", 1.0)
         return (f"rapp g={params.get('speed_gain', '?')} "
                 f"[{params.get('lookahead_min', '?')},{params.get('lookahead_max', '?')}]"
-                + (f" c={curv}" if curv != 1.0 else ""))
+                + (f" c={curv}" if curv != 1.0 else "")
+                + (f" tau={params['delay_comp_s']}" if params.get("delay_comp_s") else ""))
     if name == "pid":
         return f"pid {params.get('kp', '?')}/{params.get('ki', '?')}/{params.get('kd', '?')}"
     return name
