@@ -94,7 +94,8 @@ def optimise(args) -> dict:
 
     ggv = np.array([[0.0, args.ax_tyre, args.ay_max], [args.v_max + 10.0, args.ax_tyre, args.ay_max]])
     vx = tph.calc_vel_profile.calc_vel_profile(
-        ggv=ggv, ax_max_machines=AX_MACHINE, v_max=args.v_max, kappa=kappa, el_lengths=el_lengths,
+        ggv=ggv, ax_max_machines=AX_MACHINE * np.array([1.0, args.accel_scale]), v_max=args.v_max,
+        kappa=kappa, el_lengths=el_lengths,
         closed=True, drag_coeff=0.0, m_veh=1500.0, dyn_model_exp=1.0, filt_window=None,
     )
     ax = tph.calc_ax_profile.calc_ax_profile(
@@ -147,6 +148,9 @@ def main() -> None:
     p.add_argument("--ax-tyre", type=float, default=6.0,
                    help="Braking limit (m/s^2). The Audi reached about 7.6 at 0.64 brake.")
     p.add_argument("--v-max", type=float, default=22.0)
+    p.add_argument("--accel-scale", type=float, default=1.0,
+                   help="Scale the measured acceleration curve. Above 1 plans more speed than the capped "
+                        "throttle delivers, so the car runs at full allowed throttle on the straights.")
     p.add_argument("--smooth-cm", type=float, default=3.0,
                    help="Smoothing of the optimised line (cm). Removes curvature ripple in tight corners.")
     p.add_argument("--step-opt", type=float, default=1.5, help="Spacing of optimisation points (m).")
