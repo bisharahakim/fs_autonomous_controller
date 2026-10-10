@@ -170,6 +170,13 @@ class CarlaPlant:
         except Exception as exc:  # informational only
             self.info["wheel_max_steer_angle_deg"] = f"unavailable: {type(exc).__name__}"
 
+        try:
+            box = self.vehicle.bounding_box
+            self.info["bbox_half_extent_m"] = [float(box.extent.x), float(box.extent.y), float(box.extent.z)]
+            self.info["bbox_center_offset_m"] = [float(box.location.x), float(box.location.y), float(box.location.z)]
+        except Exception as exc:  # informational only
+            self.info["bbox_half_extent_m"] = f"unavailable: {type(exc).__name__}"
+
         # Ground-truth contact detection: the simulator reports what the car touched.
         try:
             sensor_bp = self.world.get_blueprint_library().find("sensor.other.collision")
@@ -320,7 +327,16 @@ class KinematicPlant:
 
 def build_controller(args, raceline: Raceline):
     if args.controller == "rapp":
-        return RAPPLateral(raceline, RAPPConfig(wheelbase_m=WHEELBASE_M, max_steer_rad=MAX_STEER_RAD))
+        return RAPPLateral(
+            raceline,
+            RAPPConfig(
+                wheelbase_m=WHEELBASE_M,
+                max_steer_rad=MAX_STEER_RAD,
+                speed_gain=args.rapp_speed_gain,
+                lookahead_min=args.rapp_lookahead_min,
+                lookahead_max=args.rapp_lookahead_max,
+            ),
+        )
     if args.controller == "pp":
         return PurePursuitLateral(
             raceline,
@@ -372,6 +388,15 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         out_dir = OUTPUT_ROOT / f"bench_{args.controller}_{stamp}_{suffix}"
     out_dir.mkdir(parents=True)
     log_path = out_dir / "run_log.csv"
+    # Written first so a run stopped with Ctrl+C is still labelled; replaced at the end.
+    (out_dir / "meta.json").write_text(json.dumps({
+        "controller": args.controller,
+        "controller_params": controller.params(),
+        "speed_scale": args.speed_scale,
+        "status": "interrupted",
+        "lap_time_s": None,
+        **plant.info,
+    }, indent=2))
 
     total_points = len(raceline.s_m) - 1
     end_zone = int(0.85 * total_points)
@@ -506,6 +531,10 @@ def main() -> None:
     p.add_argument("--host", default="localhost")
     p.add_argument("--port", type=int, default=2000)
     p.add_argument("--restore-async", action="store_true", help="Only switch CARLA back to async mode, then exit.")
+    g = p.add_argument_group("RAPP (steering only; the shared speed reference is not affected)")
+    g.add_argument("--rapp-speed-gain", type=float, default=RAPPConfig.speed_gain)
+    g.add_argument("--rapp-lookahead-min", type=float, default=RAPPConfig.lookahead_min)
+    g.add_argument("--rapp-lookahead-max", type=float, default=RAPPConfig.lookahead_max)
     g = p.add_argument_group("pure pursuit")
     g.add_argument("--pp-lookahead", type=float, default=PurePursuitLateralConfig.lookahead_m)
     g.add_argument("--pp-gain", type=float, default=PurePursuitLateralConfig.lookahead_gain_s)
