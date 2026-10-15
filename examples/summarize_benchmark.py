@@ -96,7 +96,7 @@ def controller_label(meta: dict) -> str:
         curv = params.get("curv_gain", 1.0)
         return (f"rapp g={params.get('speed_gain', '?')} "
                 f"[{params.get('lookahead_min', '?')},{params.get('lookahead_max', '?')}]"
-                + (f" c={curv}" if curv != 1.0 else "")
+                + ((" no-curv" if curv >= 50 else f" c={curv}") if curv != 1.0 else "")
                 + (f" tau={params['delay_comp_s']}" if params.get("delay_comp_s") else ""))
     if name == "pid":
         return f"pid {params.get('kp', '?')}/{params.get('ki', '?')}/{params.get('kd', '?')}"
@@ -149,6 +149,9 @@ def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_d
     speed_ref = meta.get("speed_ref", "lookahead")
     if speed_ref != "lookahead":
         label += f" v={speed_ref}"
+    car = (meta.get("vehicle_params") or {}).get("name", "audi_tt_carla")
+    if car != "audi_tt_carla":
+        label += " car=" + car.replace("audi_tt_carla_", "")
     if meta.get("grip_cap_mps2"):
         label += f" +grip{meta['grip_cap_mps2']:g}"
     if meta.get("reference") == "rear":

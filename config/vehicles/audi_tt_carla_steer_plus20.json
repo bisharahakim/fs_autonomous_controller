@@ -1,0 +1,14 @@
+{
+  "name": "audi_tt_carla_steer_plus20",
+  "carla_blueprint": "vehicle.ue4.audi.tt",
+  "wheelbase_m": 2.51,
+  "length_m": 4.18,
+  "width_m": 1.99,
+  "legacy_max_steer_rad": 0.5,
+  "steering": {
+    "full_command_angle_rad": 0.6888,
+    "speed_coeff_s2pm2": 0.0059
+  },
+  "ay_max_mps2": 8.5,
+  "notes": "ROBUSTNESS TEST ONLY. Same car as audi_tt_carla, but the controller's steering model is wrong: full_command_angle_rad x1.2 (controller thinks the steering is stronger, so it under-steers). Simulates measuring the real car's steering badly."
+}
