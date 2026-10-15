@@ -47,13 +47,45 @@ from fs_controller.lateral import (  # noqa: E402
 from fs_controller.raceline import Raceline, load_raceline  # noqa: E402
 from fs_controller.rapp import RAPP, RAPPConfig  # noqa: E402
 from fs_controller.velocity_pid import VelocityPID, VelocityPIDConfig  # noqa: E402
+from fs_controller.vehicle import VehicleParams, load_vehicle  # noqa: E402
 
 RACELINE_PATH = PROJECT_ROOT / "inputs/racelines/hockenheim_fsg_benjamin24_safe.csv"
 OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "carla"
 
+# Set from the vehicle file (--vehicle) in main(); these are the Audi defaults.
+VEHICLE: VehicleParams = load_vehicle("audi_tt_carla")
 VEHICLE_BLUEPRINT = "vehicle.ue4.audi.tt"
 WHEELBASE_M = 2.51
 MAX_STEER_RAD = 0.5
+STEER_MAP = "legacy"
+
+
+REFERENCE = "centre"
+
+
+def reference_point(x: float, y: float, yaw: float) -> tuple[float, float]:
+    """Point the steering controller works from.
+
+    centre: the vehicle's logged position (CARLA actor origin, the body centre).
+    rear:   the rear axle, assumed half a wheelbase behind the centre. Pure Pursuit's
+            geometry (steering angle from wheelbase and arc curvature) is exact only for
+            the rear axle, because that is the point whose velocity follows the heading.
+    """
+    if REFERENCE == "rear":
+        half = 0.5 * WHEELBASE_M
+        return x - half * math.cos(yaw), y - half * math.sin(yaw)
+    return x, y
+
+
+def steering_command(delta_rad: float, speed_mps: float) -> float:
+    """Desired road-wheel angle -> normalised actuator command in [-1, 1] (track sign).
+
+    legacy:     command = delta / MAX_STEER_RAD (assumes the car turns the same at every speed)
+    calibrated: invert the vehicle's measured steering response at the current speed
+    """
+    if STEER_MAP == "calibrated":
+        return VEHICLE.steering.command_for(delta_rad, speed_mps)
+    return clamp(delta_rad / VEHICLE.legacy_max_steer_rad, -1.0, 1.0)
 
 LOG_COLUMNS = [
     "t_s", "x_m", "y_m", "yaw_carla_deg", "yaw_rapp_rad", "v_mps",
@@ -231,8 +263,9 @@ class CarlaPlant:
             yaw_carla_deg,
         )
 
-    def apply(self, steering_rad: float, throttle: float, brake: float) -> float:
-        steer_norm = clamp(-steering_rad / MAX_STEER_RAD, -1.0, 1.0)
+    def apply(self, command: float, throttle: float, brake: float) -> float:
+        """command: normalised steering in [-1, 1], + = left (track frame)."""
+        steer_norm = clamp(-command, -1.0, 1.0)      # CARLA: + = right
         self.vehicle.apply_control(
             self._carla.VehicleControl(
                 throttle=float(throttle),
@@ -321,8 +354,9 @@ class CarlaPlant:
 
 
 class KinematicPlant:
-    """Tiny bicycle model for dry runs without CARLA. NOT a vehicle-dynamics
-    model: no tyre slip, no load transfer. It only proves the code path."""
+    """Bicycle model for dry runs without CARLA, using the vehicle file's measured
+    steering response (so it turns less at speed, like the CARLA car). Still not a
+    vehicle-dynamics model: no slip angles, no load transfer. It proves the code path."""
 
     def __init__(self, dt_s: float) -> None:
         self.dt_s = dt_s
@@ -343,14 +377,15 @@ class KinematicPlant:
     def state(self) -> tuple[float, float, float, float, float]:
         return self.x, self.y, self.yaw, self.v, -math.degrees(self.yaw)
 
-    def apply(self, steering_rad: float, throttle: float, brake: float) -> float:
-        self._cmd = (clamp(steering_rad, -MAX_STEER_RAD, MAX_STEER_RAD), throttle, brake)
-        return clamp(-steering_rad / MAX_STEER_RAD, -1.0, 1.0)
+    def apply(self, command: float, throttle: float, brake: float) -> float:
+        self._cmd = (clamp(command, -1.0, 1.0), throttle, brake)
+        return -self._cmd[0]
 
     def step(self) -> None:
         dt = self.dt_s
-        steer_cmd, throttle, brake = self._cmd
-        self.delta += (steer_cmd - self.delta) * dt / (0.10 + dt)  # steering lag
+        command, throttle, brake = self._cmd
+        steer_cmd = VEHICLE.steering.angle(command, self.v)
+        self.delta += (steer_cmd - self.delta) * dt / (0.05 + dt)  # steering lag
         accel = 4.5 * throttle - 9.0 * brake - 0.0035 * self.v * self.v - 0.1
         self.v = max(0.0, self.v + accel * dt)
         beta = math.atan(0.5 * math.tan(self.delta))  # reference point = car centre
@@ -377,17 +412,20 @@ class KinematicPlant:
 
 # --------------------------------------------------------------------------
 
-# Steering response of the CARLA Audi TT, identified from the benchmark logs by
-# fitting the heading 0.15 s ahead (0.9 deg RMS error on the fit laps, 1.2 deg on
-# laps not used for the fit). Effective road-wheel angle per radian commanded:
-#     gain / (1 + understeer * v^2)   ->  1.28 at 6 m/s, 0.73 at 10, 0.45 at 14, 0.29 at 18
-# The first predictor ("simple") used a constant 0.86, which overestimates how much the
-# car turns at speed; the prediction then over-compensated and the tracking error grew.
-PREDICT_MODELS = {
-    "fitted": (2.2, 0.02),
-    "simple": (0.86, 0.0),
-}
-PREDICT_MODEL = PREDICT_MODELS["fitted"]
+# Steering model used by the delay predictor (--predict-model):
+#   vehicle = the vehicle file's identified response, through the active steering map
+#   v14     = first fitted version: gain 2.2 / (1 + 0.02 v^2) on the legacy command
+#   simple  = constant gain 0.86 (the first predictor)
+PREDICT_MODEL = "vehicle"
+
+
+def _effective_angle(delta_rad: float, speed_mps: float) -> float:
+    if PREDICT_MODEL == "vehicle":
+        return VEHICLE.steering.angle(steering_command(delta_rad, speed_mps), speed_mps)
+    clamped = clamp(delta_rad, -MAX_STEER_RAD, MAX_STEER_RAD)
+    if PREDICT_MODEL == "v14":
+        return clamped * 2.2 / (1.0 + 0.02 * speed_mps * speed_mps)
+    return clamped * 0.86
 
 
 def predict_pose(x: float, y: float, yaw: float, v: float, pending, dt: float):
@@ -397,9 +435,8 @@ def predict_pose(x: float, y: float, yaw: float, v: float, pending, dt: float):
     advanced through them with a bicycle model (speed held constant over the delay).
     The controller then steers from that predicted pose instead of the current one.
     """
-    gain, understeer = PREDICT_MODEL
     for steering, _, _ in pending:
-        delta = clamp(steering, -MAX_STEER_RAD, MAX_STEER_RAD) * gain / (1.0 + understeer * v * v)
+        delta = _effective_angle(steering, v)
         beta = math.atan(0.5 * math.tan(delta))
         x += v * math.cos(yaw + beta) * dt
         y += v * math.sin(yaw + beta) * dt
@@ -471,6 +508,7 @@ def build_controller(args, raceline: Raceline):
                 curv_gain=args.rapp_curv_gain,
                 delay_comp_s=args.rapp_delay_comp,
             ),
+            feedforward=args.feedforward,
         )
     if args.controller == "pp":
         return PurePursuitLateral(
@@ -480,6 +518,7 @@ def build_controller(args, raceline: Raceline):
                 max_steer_rad=MAX_STEER_RAD,
                 lookahead_m=args.pp_lookahead,
                 lookahead_gain_s=args.pp_gain,
+                feedforward=args.feedforward,
             ),
         )
     return CrossTrackPID(
@@ -575,12 +614,12 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
             x, y, yaw, v, yaw_carla_deg = plant.state()
             if args.predict_delay and pending:
                 px, py, pyaw = predict_pose(x, y, yaw, v, pending, dt)
-                lat = controller.compute(px, py, pyaw, v, dt)
+                lat = controller.compute(*reference_point(px, py, pyaw), pyaw, v, dt)
                 actual_index = raceline.nearest_index(x, y)
                 actual_xte = signed_cross_track(raceline, x, y, actual_index)
             else:
-                lat = controller.compute(x, y, yaw, v, dt)
-                actual_index = lat.nearest_index
+                lat = controller.compute(*reference_point(x, y, yaw), yaw, v, dt)
+                actual_index = lat.nearest_index if args.reference == "centre" else raceline.nearest_index(x, y)
                 actual_xte = lat.cross_track_m
             s_actual = float(raceline.s_m[actual_index])
             s_now = float(raceline.s_m[lat.nearest_index])
@@ -594,7 +633,8 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
             if args.draw:
                 plant.draw_lookahead(lookahead_overlay(raceline, lat, controller))
             pending.append((lat.steering, lon.throttle, lon.brake))
-            steer_norm = plant.apply(*pending.popleft())
+            delta_cmd, throttle_cmd, brake_cmd = pending.popleft()
+            steer_norm = plant.apply(steering_command(delta_cmd, v), throttle_cmd, brake_cmd)
 
             if actual_index > end_zone:
                 armed = True
@@ -648,6 +688,10 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "delay_s": round(args.delay_steps * dt, 4),
         "predict_delay": bool(args.predict_delay),
         "predict_model": args.predict_model if args.predict_delay else None,
+        "steer_map": STEER_MAP,
+        "reference": REFERENCE,
+        "feedforward": bool(args.feedforward),
+        "vehicle_params": VEHICLE.to_dict(),
         "dt_s": dt,
         "wheelbase_m": WHEELBASE_M,
         "max_steer_rad": MAX_STEER_RAD,
@@ -702,8 +746,16 @@ def main() -> None:
     p.add_argument("--predict-delay", action="store_true",
                    help="Delay compensation: steer from the pose predicted through the pending commands. "
                         "Works with any controller.")
-    p.add_argument("--predict-model", choices=tuple(PREDICT_MODELS), default="fitted",
-                   help="Steering model used by --predict-delay. 'simple' is the first, constant-gain version.")
+    p.add_argument("--predict-model", choices=("vehicle", "v14", "simple"), default="vehicle",
+                   help="Steering model used by --predict-delay (see PREDICT_MODEL).")
+    p.add_argument("--vehicle", default="audi_tt_carla",
+                   help="Vehicle file: a name in config/vehicles/ or a path to a JSON file.")
+    p.add_argument("--steer-map", choices=("legacy", "calibrated"), default="legacy",
+                   help="legacy: command = angle / 0.5 rad. calibrated: invert the car's measured steering response.")
+    p.add_argument("--reference", choices=("centre", "rear"), default="centre",
+                   help="Point the steering controller works from: body centre (original) or rear axle.")
+    p.add_argument("--feedforward", action="store_true",
+                   help="Curvature feed-forward for Pure Pursuit and RAPP (raceline curvature replaces the chord estimate).")
     p.add_argument("--no-sync", action="store_true", help="Do not switch CARLA to synchronous mode.")
     p.add_argument("--realtime", action="store_true", help="Pace synchronous ticks to wall-clock (for watching/recording).")
     p.add_argument("--keep-ego", action="store_true", help="Leave the car in the world after the run.")
@@ -745,8 +797,17 @@ def main() -> None:
     g.add_argument("--kff-brake", type=float, default=None,
                    help="Brake feed-forward per m/s^2 of requested deceleration. Default 0, or 0.05 with envelope.")
     args = p.parse_args()
-    global PREDICT_MODEL
-    PREDICT_MODEL = PREDICT_MODELS[args.predict_model]
+    global PREDICT_MODEL, VEHICLE, VEHICLE_BLUEPRINT, WHEELBASE_M, MAX_STEER_RAD, STEER_MAP, REFERENCE
+    REFERENCE = args.reference
+    PREDICT_MODEL = args.predict_model
+    VEHICLE = load_vehicle(args.vehicle)
+    VEHICLE_BLUEPRINT = VEHICLE.carla_blueprint or VEHICLE_BLUEPRINT
+    WHEELBASE_M = VEHICLE.wheelbase_m
+    STEER_MAP = args.steer_map
+    # The controllers clamp the desired road-wheel angle. Legacy keeps the original 0.5 rad;
+    # calibrated allows up to what a full command gives at low speed (the map saturates beyond).
+    MAX_STEER_RAD = (VEHICLE.legacy_max_steer_rad if STEER_MAP == "legacy"
+                     else VEHICLE.steering.full_command_angle_rad)
 
     envelope = args.speed_ref == "envelope"
     if args.brake_decel is None:

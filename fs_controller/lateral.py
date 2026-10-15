@@ -60,6 +60,38 @@ def signed_cross_track(raceline: Raceline, x: float, y: float, nearest: int) -> 
     return best_signed
 
 
+def pure_pursuit_curvature(x: float, y: float, yaw: float, target_x: float, target_y: float) -> float:
+    """Curvature of the arc from the vehicle pose through the target point."""
+    dx, dy = target_x - x, target_y - y
+    local_x = math.cos(yaw) * dx + math.sin(yaw) * dy
+    local_y = -math.sin(yaw) * dx + math.cos(yaw) * dy
+    return 0.0 if local_x <= 0.0 else 2.0 * local_y / max(local_x * local_x + local_y * local_y, 1e-6)
+
+
+def feedforward_curvature(raceline: Raceline, nearest: int, target_x: float, target_y: float,
+                          kappa_pp: float) -> float:
+    """Curvature feed-forward for any pure-pursuit-type controller.
+
+    Pure Pursuit returns kappa_pp = (curvature of the path itself, as seen through a chord
+    of length L) + (correction for the vehicle's position and heading error). The chord
+    estimate of the path's own curvature is what turns in early at a corner entry and
+    late at its exit, i.e. what cuts corners. Here it is swapped for the raceline's true
+    curvature at the vehicle, keeping Pure Pursuit's error correction:
+
+        kappa = kappa_pp - kappa_chord + kappa_ref
+
+    kappa_chord is the arc Pure Pursuit would command if the vehicle sat exactly on the
+    path, aligned with it. On a constant-radius arc all three terms are equal, so nothing
+    changes; they differ only where the curvature changes.
+    """
+    n = len(raceline.x_m) - 1
+    i = nearest % n
+    heading = raceline.geometric_heading_at(i)
+    kappa_chord = pure_pursuit_curvature(float(raceline.x_m[i]), float(raceline.y_m[i]), heading, target_x, target_y)
+    kappa_ref = raceline.kappa_at(float(raceline.s_m[i]))
+    return kappa_pp - kappa_chord + kappa_ref
+
+
 def _pure_pursuit_steering(
     x: float,
     y: float,
@@ -85,9 +117,10 @@ class RAPPLateral:
 
     name = "rapp"
 
-    def __init__(self, raceline: Raceline, config: RAPPConfig) -> None:
+    def __init__(self, raceline: Raceline, config: RAPPConfig, feedforward: bool = False) -> None:
         self.raceline = raceline
         self.config = config
+        self.feedforward = feedforward
         self._rapp = RAPP(raceline, config)
 
     def reset(self) -> None:
@@ -95,8 +128,16 @@ class RAPPLateral:
 
     def compute(self, x: float, y: float, yaw: float, v: float, dt_s: float) -> LateralCommand:
         cmd = self._rapp.compute_control(x, y, yaw, v)
+        steering = cmd.steering
+        if self.feedforward:
+            kappa = feedforward_curvature(
+                self.raceline, cmd.nearest_index, cmd.target_x, cmd.target_y,
+                pure_pursuit_curvature(x, y, yaw, cmd.target_x, cmd.target_y),
+            )
+            steering = _clamp(math.atan(self.config.wheelbase_m * kappa),
+                              -self.config.max_steer_rad, self.config.max_steer_rad)
         return LateralCommand(
-            steering=cmd.steering,
+            steering=steering,
             nearest_index=cmd.nearest_index,
             target_index=cmd.target_index,
             target_x=cmd.target_x,
@@ -116,7 +157,9 @@ class RAPPLateral:
         return term
 
     def params(self) -> dict:
-        return {k: getattr(self.config, k) for k in self.config.__dataclass_fields__}
+        out = {k: getattr(self.config, k) for k in self.config.__dataclass_fields__}
+        out["feedforward"] = self.feedforward
+        return out
 
 
 @dataclass(frozen=True)
@@ -127,6 +170,7 @@ class PurePursuitLateralConfig:
     lookahead_gain_s: float = 0.0  # optional speed term: Ld = lookahead_m + gain * v
     lookahead_min: float = 2.0
     lookahead_max: float = 10.0
+    feedforward: bool = False
 
 
 class PurePursuitLateral:
@@ -152,9 +196,16 @@ class PurePursuitLateral:
         s_now = float(self.raceline.s_m[nearest])
         lookahead = _clamp(c.lookahead_m + c.lookahead_gain_s * v, c.lookahead_min, c.lookahead_max)
         target = self.raceline.target_at_s(s_now + lookahead)
-        steering = _pure_pursuit_steering(
-            x, y, yaw, target.x_m, target.y_m, c.wheelbase_m, c.max_steer_rad
-        )
+        if c.feedforward:
+            kappa = feedforward_curvature(
+                self.raceline, nearest, target.x_m, target.y_m,
+                pure_pursuit_curvature(x, y, yaw, target.x_m, target.y_m),
+            )
+            steering = _clamp(math.atan(c.wheelbase_m * kappa), -c.max_steer_rad, c.max_steer_rad)
+        else:
+            steering = _pure_pursuit_steering(
+                x, y, yaw, target.x_m, target.y_m, c.wheelbase_m, c.max_steer_rad
+            )
         return LateralCommand(
             steering=steering,
             nearest_index=nearest,

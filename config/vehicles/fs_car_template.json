@@ -1,0 +1,13 @@
+{
+  "name": "fs_car_template",
+  "carla_blueprint": null,
+  "wheelbase_m": 1.55,
+  "length_m": 2.9,
+  "width_m": 1.4,
+  "legacy_max_steer_rad": 0.5,
+  "steering": {
+    "full_command_angle_rad": 0.5,
+    "speed_coeff_s2pm2": 0.0
+  },
+  "notes": "TEMPLATE. Wheelbase from the pure-Python model; length, width and steering are placeholders. Fill full_command_angle_rad with the measured road-wheel angle at full steering command, and fit speed_coeff_s2pm2 from logged laps with scripts/identify_steering.py."
+}

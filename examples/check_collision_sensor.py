@@ -20,7 +20,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from fs_controller.lateral import RAPPLateral  # noqa: E402
 from fs_controller.raceline import load_raceline  # noqa: E402
 from fs_controller.rapp import RAPPConfig  # noqa: E402
-from run_carla_benchmark import MAX_STEER_RAD, RACELINE_PATH, WHEELBASE_M, CarlaPlant  # noqa: E402
+from run_carla_benchmark import MAX_STEER_RAD, RACELINE_PATH, WHEELBASE_M, CarlaPlant, steering_command  # noqa: E402
 
 CONE_BLUEPRINT = "static.prop.wemas_small_blue"
 CONE_DISTANCE_M = 12.0
@@ -56,7 +56,8 @@ def main() -> None:
         for _ in range(int(DRIVE_SECONDS / plant.dt_s)):
             x, y, yaw, v, _ = plant.state()
             closest = min(closest, ((x - target.x_m) ** 2 + (y - target.y_m) ** 2) ** 0.5)
-            plant.apply(steering.compute(x, y, yaw, v, plant.dt_s).steering, 0.45 if v < 6.0 else 0.0, 0.0)
+            delta = steering.compute(x, y, yaw, v, plant.dt_s).steering
+            plant.apply(steering_command(delta, v), 0.45 if v < 6.0 else 0.0, 0.0)
             plant.step()
 
         after = cone.get_transform().location

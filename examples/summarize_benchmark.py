@@ -149,8 +149,15 @@ def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_d
     speed_ref = meta.get("speed_ref", "lookahead")
     if speed_ref != "lookahead":
         label += f" v={speed_ref}"
+    if meta.get("reference") == "rear":
+        label += " +rear"
+    if meta.get("steer_map") == "calibrated":
+        label += " +cal"
+    if meta.get("feedforward"):
+        label += " +ff"
     if meta.get("predict_delay"):
-        label += " +predict" + ("(simple)" if meta.get("predict_model", "simple") == "simple" else "")
+        label += " +predict" + {"simple": "(simple)", "fitted": "(v14)", "v14": "(v14)"}.get(
+            meta.get("predict_model", "simple"), "")
     setting = label
     if meta.get("delay_s"):
         label += f" d={meta['delay_s']:.2f}s"

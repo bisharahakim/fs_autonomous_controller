@@ -1,0 +1,13 @@
+{
+  "name": "audi_tt_carla",
+  "carla_blueprint": "vehicle.ue4.audi.tt",
+  "wheelbase_m": 2.51,
+  "length_m": 4.18,
+  "width_m": 1.99,
+  "legacy_max_steer_rad": 0.5,
+  "steering": {
+    "full_command_angle_rad": 0.574,
+    "speed_coeff_s2pm2": 0.0059
+  },
+  "notes": "Size from CARLA's bounding box. Steering identified from about 150 000 samples of benchmark laps (scripts/identify_steering.py): full command gives about 30 deg at 4 m/s and 11 deg at 18 m/s. CARLA lists a 70 deg front-wheel limit, but that is not what the car achieves while driving."
+}
