@@ -150,7 +150,7 @@ def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_d
     if speed_ref != "lookahead":
         label += f" v={speed_ref}"
     if meta.get("predict_delay"):
-        label += " +predict"
+        label += " +predict" + ("(simple)" if meta.get("predict_model", "simple") == "simple" else "")
     setting = label
     if meta.get("delay_s"):
         label += f" d={meta['delay_s']:.2f}s"
