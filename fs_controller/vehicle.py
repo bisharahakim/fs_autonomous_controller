@@ -55,6 +55,8 @@ class VehicleParams:
     # Angle the original controllers assumed for a full command (legacy normalisation).
     legacy_max_steer_rad: float
     steering: SteeringResponse
+    # Lateral acceleration the planned speed may ask for (m/s^2). None = no limit.
+    ay_max_mps2: float | None = None
     carla_blueprint: str | None = None
     notes: str = ""
 
@@ -64,6 +66,7 @@ class VehicleParams:
             "width_m": self.width_m, "legacy_max_steer_rad": self.legacy_max_steer_rad,
             "steering": {"full_command_angle_rad": self.steering.full_command_angle_rad,
                          "speed_coeff_s2pm2": self.steering.speed_coeff_s2pm2},
+            "ay_max_mps2": self.ay_max_mps2,
             "carla_blueprint": self.carla_blueprint,
         }
 
@@ -84,6 +87,7 @@ def load_vehicle(name_or_path: str | Path) -> VehicleParams:
             full_command_angle_rad=float(steering["full_command_angle_rad"]),
             speed_coeff_s2pm2=float(steering.get("speed_coeff_s2pm2", 0.0)),
         ),
+        ay_max_mps2=(float(data["ay_max_mps2"]) if data.get("ay_max_mps2") is not None else None),
         carla_blueprint=data.get("carla_blueprint"),
         notes=data.get("notes", ""),
     )

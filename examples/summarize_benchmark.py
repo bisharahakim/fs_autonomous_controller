@@ -149,6 +149,8 @@ def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_d
     speed_ref = meta.get("speed_ref", "lookahead")
     if speed_ref != "lookahead":
         label += f" v={speed_ref}"
+    if meta.get("grip_cap_mps2"):
+        label += f" +grip{meta['grip_cap_mps2']:g}"
     if meta.get("reference") == "rear":
         label += " +rear"
     if meta.get("steer_map") == "calibrated":

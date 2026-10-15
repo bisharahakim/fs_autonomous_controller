@@ -33,6 +33,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -75,6 +77,29 @@ def reference_point(x: float, y: float, yaw: float) -> tuple[float, float]:
         half = 0.5 * WHEELBASE_M
         return x - half * math.cos(yaw), y - half * math.sin(yaw)
     return x, y
+
+
+def apply_grip_cap(raceline: Raceline, ay_max: float, smooth_m: float = 1.0) -> int:
+    """Cap the planned speed so the car never needs more than ay_max in a corner.
+
+    v <= sqrt(ay_max / |kappa|), with |kappa| averaged over +-smooth_m so single-point
+    spikes in the curvature column do not dictate the speed. The planned acceleration
+    is recomputed from the capped profile (a = v dv/ds). Returns the number of capped points.
+    """
+    n = len(raceline.s_m) - 1                          # last row repeats the first
+    step = float(np.median(np.diff(raceline.s_m)))
+    half = max(1, int(round(smooth_m / step)))
+    kappa = np.abs(raceline.kappa_radpm[:n])
+    padded = np.concatenate((kappa[-half:], kappa, kappa[:half]))
+    kappa_avg = np.convolve(padded, np.ones(2 * half + 1) / (2 * half + 1), mode="valid")
+    v_old = raceline.v_target_mps[:n].copy()
+    v_new = np.minimum(v_old, np.sqrt(ay_max / np.maximum(kappa_avg, 1e-6)))
+    ds = np.diff(raceline.s_m)
+    v_next = np.roll(v_new, -1)
+    accel = (v_next**2 - v_new**2) / (2.0 * ds)
+    raceline.v_target_mps = np.append(v_new, v_new[0])
+    raceline.a_target_mps2 = np.append(accel, accel[0])
+    return int(np.sum(v_new < v_old - 1e-6))
 
 
 def steering_command(delta_rad: float, speed_mps: float) -> float:
@@ -696,6 +721,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "wheelbase_m": WHEELBASE_M,
         "max_steer_rad": MAX_STEER_RAD,
         "raceline": args.raceline.name,
+        "grip_cap_mps2": args.grip_cap,
         "status": status,
         "lap_time_s": lap_time,
         "elapsed_s": round(t, 3),
@@ -750,6 +776,9 @@ def main() -> None:
                    help="Steering model used by --predict-delay (see PREDICT_MODEL).")
     p.add_argument("--vehicle", default="audi_tt_carla",
                    help="Vehicle file: a name in config/vehicles/ or a path to a JSON file.")
+    p.add_argument("--grip-cap", nargs="?", type=float, const=-1.0, default=None,
+                   help="Cap the planned speed at sqrt(ay_max/|kappa|). Bare flag: the vehicle's ay_max_mps2; "
+                        "or give a value in m/s^2. Applies to every controller (shared speed plan).")
     p.add_argument("--steer-map", choices=("legacy", "calibrated"), default="legacy",
                    help="legacy: command = angle / 0.5 rad. calibrated: invert the car's measured steering response.")
     p.add_argument("--reference", choices=("centre", "rear"), default="centre",
@@ -822,6 +851,13 @@ def main() -> None:
         return
 
     raceline = load_raceline(args.raceline)
+    if args.grip_cap is not None:
+        if args.grip_cap < 0:
+            if VEHICLE.ay_max_mps2 is None:
+                raise SystemExit(f"--grip-cap: vehicle '{VEHICLE.name}' has no ay_max_mps2; give a value.")
+            args.grip_cap = VEHICLE.ay_max_mps2
+        capped = apply_grip_cap(raceline, args.grip_cap)
+        print(f"Grip cap {args.grip_cap:.1f} m/s^2: planned speed lowered at {capped} of {len(raceline.s_m) - 1} points.")
     if args.plant == "carla":
         plant = CarlaPlant(args.dt, sync=not args.no_sync, host=args.host, port=args.port, realtime=args.realtime)
     else:
