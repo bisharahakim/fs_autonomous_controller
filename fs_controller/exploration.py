@@ -523,9 +523,11 @@ class ExplorationConfig:
     commit_m: float = 1.0             # the new tree starts this far beyond where the car will be
     rejoin_m: float = 0.4             # off the plan by more than this: start again from the car
     rejoin_rad: float = 0.25          # ... or with a heading error larger than this
-    lookahead_gain_s: float = 0.45    # PFPP lookahead law
-    lookahead_min_m: float = 3.5
-    lookahead_max_m: float = 6.0
+    lookahead_gain_s: float = 0.45    # PFPP lookahead law: gain * v, no longer than the tightest
+    lookahead_min_m: float = 2.0      # corner radius within 2 m behind / 10 m ahead (RAPP's rule),
+    lookahead_max_m: float = 6.0      # kept in [min, max]. The first lap's floor is lower than the
+                                      # race lap's 3.5 m: at <= 5 m/s, 3.5 m is longer than a hairpin
+                                      # radius and pure pursuit's correction becomes weak there.
 
 
 class ExplorationLateral:
@@ -634,7 +636,9 @@ class ExplorationLateral:
             self._speed = (0.0, 0.0)
             return LateralCommand(0.0, 0, 0, x, y, 0.0, 0.0, "explore")
         i = path.nearest(x, y)
-        lookahead = min(max(c.lookahead_gain_s * v, c.lookahead_min_m), c.lookahead_max_m)
+        near = (path.s >= path.s[i] - 2.0) & (path.s <= path.s[i] + 10.0)
+        corner = 1.0 / max(float(np.abs(path.k[near]).max()) if near.any() else 0.0, 1e-3)
+        lookahead = min(max(min(c.lookahead_gain_s * v, corner), c.lookahead_min_m), c.lookahead_max_m)
         j = path.at(path.s[i] + lookahead)
         tx, ty = float(path.x[j]), float(path.y[j])
 

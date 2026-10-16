@@ -68,7 +68,14 @@ def save(fig, name: str) -> None:
 
 
 # ----------------------------------------------------------------------------- runs
-def find_run(track: str, dry: bool, controller: str = "explore", raceline_has: str | None = None):
+def noisy(m: dict) -> bool:
+    per = (m.get("controller_params") or {}).get("perception", {})
+    return bool(per.get("noise_m") or per.get("miss_prob"))
+
+
+def find_run(track: str, dry: bool, controller: str = "explore", raceline_has: str | None = None,
+             with_noise: bool = False):
+    """Latest completed run at 0.15 s; for explore, with perfect (or, with_noise, imperfect) detection."""
     best = None
     for d in sorted(RUNS.glob("bench_*")):
         mp = d / "meta.json"
@@ -84,6 +91,8 @@ def find_run(track: str, dry: bool, controller: str = "explore", raceline_has: s
         if controller == "pp" and not m.get("predict_delay"):
             continue
         if round(float(m.get("delay_s") or 0), 2) != 0.15:
+            continue
+        if controller == "explore" and noisy(m) != with_noise:
             continue
         best = d
     return best
@@ -309,6 +318,11 @@ def main() -> None:
         plot_hairpin(run, cones, centre_xy, centre_k, f"{prefix}_firstlap_hairpin")
         plot_planning(run, compare, f"{prefix}_firstlap_planning")
     rows = [("KinoRRT + PFPP, track unknown", run)]
+    noisy_dir = find_run(args.track, args.dry, with_noise=True)
+    if noisy_dir is not None and args.run is None:
+        nm = load(Path(noisy_dir), cones, centre_xy)
+        per = nm["meta"]["controller_params"]["perception"]
+        rows.append((f"... with noisy detection ({100 * per['noise_m']:.0f} cm, {100 * per['miss_prob']:.0f}% missed)", nm))
     if compare is not None:
         rows.append(("PP 4 m with prediction + steering map, known centreline", compare))
     write_table(rows, f"{prefix}_firstlap_results")

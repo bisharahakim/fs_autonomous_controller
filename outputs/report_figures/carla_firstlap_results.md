@@ -1,4 +1,5 @@
 | Run | Lap (s) | Cones | FS time (s) | Mean dist. from centreline (m) | Max dist. (m) | Closest cone (m) | Plan mean (ms) | Plan 95% (ms) | Plan max (ms) | Replans | Kept previous plan | Tight-margin plans |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| KinoRRT + PFPP, track unknown | 230.85 | 2 | 234.85 | 0.25 | 1.05 | -0.04 | 63.22 | 82.05 | 137.58 | 1155 | 5 | 1 |
+| KinoRRT + PFPP, track unknown | 231.00 | 0 | 231.00 | 0.25 | 0.87 | 0.07 | 63.65 | 81.32 | 121.04 | 1156 | 0 | 0 |
+| ... with noisy detection (10 cm, 20% missed) | 234.65 | 0 | 234.65 | 0.28 | 1.20 | 0.03 | 63.55 | 82.11 | 168.8 | 1174 | 0 | 2 |
 | PP 4 m with prediction + steering map, known centreline | 138.50 | 2 | 142.50 | 0.19 | 1.01 | -0.07 | - | - | - | - | - | - |

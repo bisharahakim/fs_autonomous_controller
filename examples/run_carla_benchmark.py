@@ -552,7 +552,7 @@ def build_explorer(args) -> ExplorationLateral:
     return ExplorationLateral(
         perception, planner,
         ExplorationConfig(v_max_mps=args.explore_v_max, ay_max_mps2=args.explore_ay, replan_s=args.explore_replan,
-                          lookahead_min_m=args.rapp_lookahead_min, lookahead_max_m=args.rapp_lookahead_max,
+                          lookahead_min_m=args.explore_lookahead_min, lookahead_max_m=args.rapp_lookahead_max,
                           lookahead_gain_s=args.rapp_speed_gain),
         wheelbase_m=WHEELBASE_M, max_steer_rad=MAX_STEER_RAD,
     )
@@ -972,6 +972,9 @@ def main() -> None:
     g.add_argument("--explore-min-radius", type=float, default=None,
                    help="Tightest turn the planner may use (m). Default: the vehicle file's min_turn_radius_m.")
     g.add_argument("--explore-seed", type=int, default=1, help="Random seed (planner and perception).")
+    g.add_argument("--explore-lookahead-min", type=float, default=2.0,
+                   help="Shortest lookahead of the first-lap tracker (m). The race lap's PFPP uses 3.5 m; at "
+                        "first-lap speeds that is longer than a hairpin's radius.")
     g = p.add_argument_group("pure pursuit")
     g.add_argument("--pp-lookahead", type=float, default=PurePursuitLateralConfig.lookahead_m)
     g.add_argument("--pp-gain", type=float, default=PurePursuitLateralConfig.lookahead_gain_s)
