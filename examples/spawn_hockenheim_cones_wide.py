@@ -13,7 +13,7 @@ import carla
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from visualization.hockenheim_fsg_track import build_fsg_hockenheim_cones
+from visualization.track_registry import get_track
 
 
 def widen_cones(left, right, desired_width_m: float):
@@ -88,19 +88,29 @@ def main():
     parser.add_argument("--z", type=float, default=0.0)
     parser.add_argument("--flip-y", action="store_true")
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--track", default="hockenheim_fsg",
+                        help="Track to lay out: hockenheim_fsg, or a name from inputs/tracks/ (e.g. brandshatch).")
+    parser.add_argument("--clear", action="store_true", help="Remove all cones already in the world first.")
     args = parser.parse_args()
 
     client = carla.Client("localhost", 2000)
     client.set_timeout(10.0)
     world = client.get_world()
 
-    left, right = build_fsg_hockenheim_cones()
+    if args.clear:
+        old = [a for a in world.get_actors() if "wemas" in a.type_id or "cone" in a.type_id]
+        for actor in old:
+            actor.destroy()
+        print(f"Removed {len(old)} existing cones.")
+        time.sleep(0.5)
+
+    left, right = get_track(args.track).build_cones()
     left, right = widen_cones(left, right, desired_width_m=args.width)
 
     left_bp = get_blueprint(world, "static.prop.wemas_small_blue")
     right_bp = get_blueprint(world, "static.prop.wemas_small_yellow")
 
-    print(f"Spawning widened Hockenheim cones")
+    print(f"Spawning widened {args.track} cones")
     print(f"Desired width: {args.width:.2f} m")
     print(f"Left cones: {len(left)}")
     print(f"Right cones: {len(right)}")

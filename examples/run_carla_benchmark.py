@@ -582,6 +582,8 @@ def video_title(args) -> tuple[str, str]:
     subtitle = f"actuation delay {args.delay_steps * args.dt:.2f} s"
     if "first_lap" in args.raceline.name:
         subtitle += ", first-lap mode"
+    if args.track != "hockenheim_fsg":
+        subtitle += f", track: {args.track} (unseen)"
     return title, subtitle
 
 
@@ -600,7 +602,7 @@ def make_recorder(args, plant, raceline: Raceline, out_dir: Path):
     title, subtitle = video_title(args)
     width, height = (int(v) for v in args.record_size.lower().split("x"))
     line_xy = np.column_stack((raceline.x_m, raceline.y_m))
-    return LapRecorder(plant, path, title, subtitle, line_xy, sb.load_cones(sb.TRACK_WIDTH_M),
+    return LapRecorder(plant, path, title, subtitle, line_xy, sb.load_cones(sb.TRACK_WIDTH_M, args.track),
                        size=(width, height), fps=1.0 / args.dt, gamma=args.record_gamma)
 
 
@@ -770,6 +772,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "wheelbase_m": WHEELBASE_M,
         "max_steer_rad": MAX_STEER_RAD,
         "raceline": args.raceline.name,
+        "track": args.track,
         "grip_cap_mps2": args.grip_cap,
         "video": video,
         "status": status,
@@ -849,6 +852,9 @@ def main() -> None:
                    help="Brighten the camera image: below 1 lifts dark areas (e.g. 0.6). 1 = as rendered.")
     p.add_argument("--draw", action="store_true",
                    help="Draw the lookahead on the track (ribbon, metre marks, target, distance). Use with --realtime.")
+    p.add_argument("--track", default="hockenheim_fsg",
+                   help="Cone layout in the world (for cone counting and the video): hockenheim_fsg or a name "
+                        "from inputs/tracks/. Use with the matching --raceline.")
     p.add_argument("--raceline", type=Path, default=RACELINE_PATH,
                    help="Raceline CSV to follow (default: the original Hockenheim line).")
     p.add_argument("--host", default="localhost")

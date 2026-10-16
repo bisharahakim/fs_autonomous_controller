@@ -49,8 +49,15 @@ TRACKS: dict[str, TrackDefinition] = {
 
 
 def get_track(name: str) -> TrackDefinition:
-    try:
+    """Built-in tracks, or any inputs/tracks/<name>_centreline.csv (see csv_track.py)."""
+    if name in TRACKS:
         return TRACKS[name]
-    except KeyError as exc:
-        available = ", ".join(sorted(TRACKS))
-        raise ValueError(f"Unknown track {name!r}. Available tracks: {available}") from exc
+    try:
+        from visualization import csv_track
+    except ModuleNotFoundError:
+        import csv_track
+    path = csv_track.centreline_path(name)
+    if path.exists():
+        return TrackDefinition(name=name, builder=lambda: csv_track.build_csv_centerline(path))
+    available = ", ".join(sorted(TRACKS) + csv_track.available())
+    raise ValueError(f"Unknown track {name!r}. Available tracks: {available}")

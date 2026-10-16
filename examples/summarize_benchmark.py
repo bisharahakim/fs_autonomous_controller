@@ -37,8 +37,12 @@ IGNORE_BEFORE_S = 2.0
 CONE_PENALTY_S = 2.0     # FS Rules 2026 D 10.1.7: DOO in Autocross / Trackdrive
 
 
-def load_cones(width_m: float) -> np.ndarray:
-    left, right = build_fsg_hockenheim_cones()
+def load_cones(width_m: float, track: str = "hockenheim_fsg") -> np.ndarray:
+    if track == "hockenheim_fsg":
+        left, right = build_fsg_hockenheim_cones()
+    else:
+        from visualization.track_registry import get_track
+        left, right = get_track(track).build_cones()
     pts = []
     for l, r in zip(left, right):
         mid = np.array([0.5 * (l.x + r.x), 0.5 * (l.y + r.y)])
@@ -118,6 +122,7 @@ def controller_label(meta: dict) -> str:
 
 
 _RACELINE_CACHE: dict[str, np.ndarray] = {}
+_CONES_CACHE: dict[str, np.ndarray] = {}
 
 
 def raceline_for(meta: dict, default_xy: np.ndarray) -> tuple[np.ndarray, str]:
@@ -159,6 +164,13 @@ def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_d
         }
         label = "rapp (Sept, legacy)"
     raceline_xy, line_label = raceline_for(meta, raceline_xy)
+    track = meta.get("track", "hockenheim_fsg")
+    if track != "hockenheim_fsg":                  # another layout: its own cones, and say so
+        if track not in _CONES_CACHE:
+            _CONES_CACHE[track] = load_cones(TRACK_WIDTH_M, track)
+        cones = _CONES_CACHE[track]
+        label += f" track={track}"
+        line_label = ""
     label += line_label
     speed_ref = meta.get("speed_ref", "lookahead")
     if speed_ref != "lookahead":
@@ -205,6 +217,8 @@ def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_d
     steer_rate = np.diff(steer) / np.maximum(dt, 1e-6)
 
     moving = t >= IGNORE_BEFORE_S
+    if not moving.any():                           # stopped within the first seconds (e.g. a crashed test)
+        return None
     clearance = cone_clearance(xy[moving], yaw[moving], cones, half_length, half_width, center_forward)
     cones_hit = int((clearance.min(axis=0) <= 0.0).sum())
 

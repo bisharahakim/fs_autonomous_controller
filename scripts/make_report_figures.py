@@ -36,6 +36,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 import summarize_benchmark as sb  # noqa: E402
 
 OUT_DIR = PROJECT_ROOT / "outputs" / "report_figures"
+# Which layout the figures are for (set from --track / --raceline in main).
+TRACK = "hockenheim_fsg"
+RACELINE = sb.RACELINE_PATH
+PREFIX = "carla"
 DESIGN_DELAY_S = 0.15
 
 # Categorical colours in fixed order (validated palette, light mode). Each series also
@@ -113,8 +117,8 @@ def classify(m: dict) -> tuple[str, str] | None:
 
 
 def collect(root: Path, require_grip: bool) -> dict:
-    raceline_xy = np.loadtxt(sb.RACELINE_PATH, delimiter=";", comments="#")[:, 1:3]
-    cones = sb.load_cones(sb.TRACK_WIDTH_M)
+    raceline_xy = np.loadtxt(RACELINE, delimiter=";", comments="#")[:, 1:3]
+    cones = sb.load_cones(sb.TRACK_WIDTH_M, TRACK)
     table: dict[tuple[str, str, float], dict] = {}
     for run_dir in sorted(root.glob("bench_*")):          # sorted by time: later runs overwrite
         meta_path = run_dir / "meta.json"
@@ -125,7 +129,9 @@ def collect(root: Path, require_grip: bool) -> dict:
             continue
         if float(m.get("speed_scale", 1.0)) != 1.0 or m.get("speed_ref") != "envelope":
             continue
-        if Path(m.get("raceline", sb.RACELINE_PATH.name)).name != sb.RACELINE_PATH.name:
+        if Path(m.get("raceline", sb.RACELINE_PATH.name)).name != RACELINE.name:
+            continue
+        if m.get("track", "hockenheim_fsg") != TRACK:
             continue
         if require_grip and not m.get("grip_cap_mps2"):
             continue
@@ -262,7 +268,7 @@ def plot_robustness(table: dict) -> None:
     unique = dict(zip(labels_, handles))
     ax.legend(unique.values(), unique.keys(), frameon=False, fontsize=8, loc="upper center",
               bbox_to_anchor=(0.5, -0.45 / len(rows) - 0.08), ncol=1, labelcolor=TEXT)
-    save(fig, "carla_robustness")
+    save(fig, f"{PREFIX}_robustness")
 
 
 def plot_error_along_track(table: dict) -> None:
@@ -291,7 +297,7 @@ def plot_error_along_track(table: dict) -> None:
     ax.set_ylabel("Worst |error| per 5 m (m)", color=TEXT, fontsize=10)
     ax.set_title("Tracking error along the lap at 0.15 s delay", color=TEXT, fontsize=11, loc="left")
     ax.legend(frameon=False, fontsize=8, loc="upper right", labelcolor=TEXT)
-    save(fig, "carla_error_along_track")
+    save(fig, f"{PREFIX}_error_along_track")
 
 
 # Corners to zoom into: (label, distance along the racing line in m).
@@ -327,9 +333,10 @@ def plot_trails(table: dict) -> None:
     if not runs:
         print("  (no 0.15 s runs; skipped trail figures)")
         return
-    line = np.loadtxt(sb.RACELINE_PATH, delimiter=";", comments="#")
+    line = np.loadtxt(RACELINE, delimiter=";", comments="#")
     line_s, line_xy = line[:, 0], line[:, 1:3]
-    cones = sb.load_cones(sb.TRACK_WIDTH_M)
+    cones = sb.load_cones(sb.TRACK_WIDTH_M, TRACK)
+    zooms = ZOOMS if TRACK == "hockenheim_fsg" else []      # corner choice is per layout
     trails = {sid: lap_trail(r)[0] for sid, r in runs.items()}
     hits = {sid: cones_hit(r, cones) for sid, r in runs.items()}
 
@@ -351,15 +358,19 @@ def plot_trails(table: dict) -> None:
     # Overview with the zoom boxes.
     fig, ax = plt.subplots(figsize=(6.4, 6.4))
     draw(ax, 1.0)
-    for label, s0 in ZOOMS:
+    for label, s0 in zooms:
         cx, cy = line_xy[int(np.argmin(np.abs(line_s - s0)))]
         ax.add_patch(plt.Rectangle((cx - ZOOM_HALF_M, cy - ZOOM_HALF_M), 2 * ZOOM_HALF_M, 2 * ZOOM_HALF_M,
                                    fill=False, ec=TEXT, lw=0.8, zorder=5))
         ax.text(cx - ZOOM_HALF_M, cy + ZOOM_HALF_M + 1.5, label.split()[0], fontsize=10, color=TEXT, zorder=5)
-    ax.set_title("Driven path of each controller at 0.15 s delay (x = cone hit)", color=TEXT, fontsize=11, loc="left")
+    nice = {"brandshatch": "Brands Hatch", "montreal": "Montreal", "oschersleben": "Oschersleben"}.get(TRACK, TRACK)
+    where = "" if TRACK == "hockenheim_fsg" else f" on {nice} (unseen, no retuning)"
+    ax.set_title(f"Driven path at 0.15 s delay{where} (x = cone hit)", color=TEXT, fontsize=11, loc="left")
     ax.legend(frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.02), ncol=2, labelcolor=TEXT)
-    save(fig, "carla_trails_overview")
+    save(fig, f"{PREFIX}_trails_overview")
 
+    if not zooms:
+        return
     # Zoomed corners.
     fig, axes = plt.subplots(2, 2, figsize=(7.2, 7.6))
     for ax, (label, s0) in zip(axes.ravel(), ZOOMS):
@@ -376,7 +387,7 @@ def plot_trails(table: dict) -> None:
     fig.suptitle("Corners up close at 0.15 s delay (lines = car centre, the car is 2 m wide; x = cone hit)", color=TEXT, fontsize=11,
                  x=0.02, ha="left")
     fig.tight_layout(rect=(0, 0.06, 1, 0.97))
-    save(fig, "carla_trails_zoom")
+    save(fig, f"{PREFIX}_trails_zoom")
 
 
 def write_tables(table: dict) -> None:
@@ -384,7 +395,7 @@ def write_tables(table: dict) -> None:
     keys = sorted(table, key=lambda k: (list(SERIES).index(k[0]), k[1] != "nominal", k[1], k[2]))
     fields = ["series", "condition", "delay_s", "status", "lap_time_s", "cones_hit_geometric", "fs_time_s",
               "xte_mean_m", "xte_p95_m", "xte_max_m", "steer_rate_rms_radps", "run"]
-    with (OUT_DIR / "carla_results.csv").open("w", newline="") as f:
+    with (OUT_DIR / f"{PREFIX}_results.csv").open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         for k in keys:
@@ -397,8 +408,8 @@ def write_tables(table: dict) -> None:
         fs = f"{r['fs_time_s']:.2f}" if r["fs_time_s"] else "-"
         lines.append(f"| {SERIES[k[0]]['short']} | {k[1]} | {k[2]:.2f} | {lap} | {r['cones_hit_geometric']} | {fs} | "
                      f"{r['xte_mean_m']:.2f} | {r['xte_p95_m']:.2f} | {r['xte_max_m']:.2f} |")
-    (OUT_DIR / "carla_results.md").write_text("\n".join(lines) + "\n")
-    print("  carla_results.csv / carla_results.md")
+    (OUT_DIR / f"{PREFIX}_results.md").write_text("\n".join(lines) + "\n")
+    print(f"  {PREFIX}_results.csv / {PREFIX}_results.md")
 
 
 def main() -> None:
@@ -406,7 +417,17 @@ def main() -> None:
     p.add_argument("--root", type=Path, default=sb.OUTPUT_ROOT)
     p.add_argument("--any-speed-plan", action="store_true",
                    help="Also use runs without the grip cap (by default only grip-capped runs are compared).")
+    p.add_argument("--track", default="hockenheim_fsg",
+                   help="Layout to make figures for; another track gives the trail overview and a results table.")
+    p.add_argument("--raceline", type=Path, default=None, help="Racing line of that track (inputs/racelines/...).")
     args = p.parse_args()
+    global TRACK, RACELINE, PREFIX
+    TRACK = args.track
+    if args.raceline is not None:
+        RACELINE = args.raceline.resolve()
+    elif TRACK != "hockenheim_fsg":
+        raise SystemExit("--track needs the matching --raceline.")
+    PREFIX = "carla" if TRACK == "hockenheim_fsg" else f"carla_{TRACK}"
 
     table = collect(args.root, require_grip=not args.any_speed_plan)
     if not table:
@@ -415,6 +436,10 @@ def main() -> None:
     for (sid, cond, d), r in sorted(table.items()):
         print(f"  {SERIES[sid]['short']:<22} {cond:<16} d={d:.2f}  {r['run']}")
     print(f"Writing to {OUT_DIR}")
+    if TRACK != "hockenheim_fsg":                 # unseen track: only the 0.15 s comparison was run
+        plot_trails(table)
+        write_tables(table)
+        return
     plot_vs_delay(table, "fs_time_s", "FS time (s): lap + 2 s per cone", "carla_fs_time_vs_delay",
                   "FS time vs actuation delay (small numbers = cones hit)", cap=140.0)
     plot_vs_delay(table, "xte_p95_m", "95th-percentile tracking error (m)", "carla_error_vs_delay",
