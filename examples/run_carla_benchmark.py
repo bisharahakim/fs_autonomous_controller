@@ -521,7 +521,7 @@ def lookahead_overlay(raceline: Raceline, lat, controller) -> dict:
 
 
 def build_controller(args, raceline: Raceline):
-    if args.controller == "rapp":
+    if args.controller in ("rapp", "pfpp"):
         return RAPPLateral(
             raceline,
             RAPPConfig(
@@ -760,7 +760,10 @@ def restore_async(host: str, port: int) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--controller", choices=("rapp", "pp", "pid"), default="rapp")
+    p.add_argument("--controller", choices=("pfpp", "rapp", "pp", "pid"), default="rapp",
+                   help="pfpp = Predictive Feed-forward Pure Pursuit (ours): speed-scaled lookahead "
+                        "(0.45 v in [3.5, 6] m), delay prediction, curvature feed-forward, measured "
+                        "steering map, rear-axle reference. The flags it switches on are set automatically.")
     p.add_argument("--plant", choices=("carla", "kinematic"), default="carla")
     p.add_argument("--repeat", type=int, default=1, help="Number of consecutive laps (each from a fresh spawn).")
     p.add_argument("--speed-scale", type=float, default=1.0, help="Scale the raceline speed profile (1.0 = as planned).")
@@ -826,6 +829,12 @@ def main() -> None:
     g.add_argument("--kff-brake", type=float, default=None,
                    help="Brake feed-forward per m/s^2 of requested deceleration. Default 0, or 0.05 with envelope.")
     args = p.parse_args()
+    if args.controller == "pfpp":
+        # PFPP = the RAPP lookahead law with a 3.5 m minimum, plus every addition.
+        args.reference, args.steer_map = "rear", "calibrated"
+        args.feedforward = args.predict_delay = True
+        if args.rapp_lookahead_min == RAPPConfig.lookahead_min:
+            args.rapp_lookahead_min = 3.5
     global PREDICT_MODEL, VEHICLE, VEHICLE_BLUEPRINT, WHEELBASE_M, MAX_STEER_RAD, STEER_MAP, REFERENCE
     REFERENCE = args.reference
     PREDICT_MODEL = args.predict_model

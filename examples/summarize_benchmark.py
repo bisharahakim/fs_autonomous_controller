@@ -86,7 +86,21 @@ def cone_clearance(
     return np.hypot(ex, ey) - CONE_RADIUS_M
 
 
+def is_pfpp(meta: dict) -> bool:
+    """PFPP runs: --controller pfpp, or the same configuration run before it had a name."""
+    if meta.get("controller") == "pfpp":
+        return True
+    p = meta.get("controller_params") or {}
+    return (meta.get("controller") == "rapp" and p.get("lookahead_min") == 3.5 and p.get("lookahead_max") == 6.0
+            and p.get("curv_gain", 1.0) == 1.0 and meta.get("reference") == "rear"
+            and meta.get("steer_map") == "calibrated" and bool(meta.get("feedforward"))
+            and bool(meta.get("predict_delay")))
+
+
 def controller_label(meta: dict) -> str:
+    if is_pfpp(meta):
+        gain = (meta.get("controller_params") or {}).get("speed_gain", 0.45)
+        return "pfpp" + (f" g={gain}" if gain != 0.45 else "")
     name = meta.get("controller", "?")
     params = meta.get("controller_params") or {}
     if name == "pp":
@@ -154,13 +168,14 @@ def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_d
         label += " car=" + car.replace("audi_tt_carla_", "")
     if meta.get("grip_cap_mps2"):
         label += f" +grip{meta['grip_cap_mps2']:g}"
-    if meta.get("reference") == "rear":
+    pfpp = meta_path.exists() and is_pfpp(meta)          # its additions are part of the name
+    if meta.get("reference") == "rear" and not pfpp:
         label += " +rear"
-    if meta.get("steer_map") == "calibrated":
+    if meta.get("steer_map") == "calibrated" and not pfpp:
         label += " +cal"
-    if meta.get("feedforward"):
+    if meta.get("feedforward") and not pfpp:
         label += " +ff"
-    if meta.get("predict_delay"):
+    if meta.get("predict_delay") and not pfpp:
         label += " +predict" + {"simple": "(simple)", "fitted": "(v14)", "v14": "(v14)"}.get(
             meta.get("predict_model", "simple"), "")
     setting = label

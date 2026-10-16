@@ -39,14 +39,16 @@ DESIGN_DELAY_S = 0.15
 # Categorical colours in fixed order (validated palette, light mode). Each series also
 # has its own marker and line style, so identity never depends on colour alone.
 SERIES = {
-    "ours": dict(label="Ours (PP + feed-forward + delay prediction, speed-scaled L)",
-                 short="Ours", color="#2a78d6", marker="o", ls="-"),
+    "ours": dict(label="PFPP (ours): predictive feed-forward pure pursuit",
+                 short="PFPP (ours)", color="#2a78d6", marker="o", ls="-"),
     "pp_pkg": dict(label="Pure pursuit 4 m + same additions",
                    short="PP 4 m + additions", color="#eb6834", marker="s", ls="--"),
     "pp_classic": dict(label="Classic pure pursuit 4 m",
                        short="Classic PP 4 m", color="#1baf7a", marker="^", ls="-."),
-    "rpp_classic": dict(label="RAPP as published (adaptive lookahead, no additions)",
-                        short="RAPP (no additions)", color="#eda100", marker="D", ls=":"),
+    "rpp_classic": dict(label="RAPP, team's adaptive RPP variant (no additions)",
+                        short="RAPP", color="#eda100", marker="D", ls=":"),
+    "app": dict(label="APP: speed-scaled lookahead only (PFPP without the additions)",
+                short="APP", color="#e87ba4", marker="v", ls=(0, (1, 1))),
 }
 TEXT = "#0b0b0b"
 MUTED = "#52514e"
@@ -81,7 +83,7 @@ def classify(m: dict) -> tuple[str, str] | None:
     ctrl = m.get("controller")
     params = m.get("controller_params") or {}
     vehicle = car(m)
-    if ctrl == "rapp":
+    if ctrl in ("rapp", "pfpp"):
         gain, lmin, lmax, curv = rapp_params(m)
         if has_package(m) and lmin == 3.5 and lmax == 6.0 and curv == 1.0:
             if vehicle != "audi_tt_carla":
@@ -89,6 +91,8 @@ def classify(m: dict) -> tuple[str, str] | None:
             return "ours", {0.45: "nominal", 0.30: "lookahead short", 0.60: "lookahead long"}.get(gain, f"g={gain}")
         if no_package(m) and (gain, lmin, lmax, curv) == (0.45, 2.0, 6.0, 1.0) and vehicle == "audi_tt_carla":
             return "rpp_classic", "nominal"
+        if no_package(m) and (gain, lmin, lmax, curv) == (0.45, 3.5, 6.0, 1.0) and vehicle == "audi_tt_carla":
+            return "app", "nominal"
         return None
     if ctrl == "pp" and not params.get("lookahead_gain_s"):
         length = params.get("lookahead_m")
@@ -162,15 +166,16 @@ def failed_value(r: dict) -> bool:
 def plot_vs_delay(table: dict, metric: str, ylabel: str, name: str, title: str, cap: float | None = None) -> None:
     fig, ax = plt.subplots(figsize=(6.4, 3.8))
     style_axes(ax)
+    failed = []
     for sid, s in SERIES.items():
         pts = sorted((d, r) for (ser, cond, d), r in table.items() if ser == sid and cond == "nominal")
         if not pts:
             continue
-        xs, ys, notes = [], [], []
+        xs, ys = [], []
         for d, r in pts:
             value = r[metric]
-            if value is None:                      # lap not completed
-                notes.append((d, r["status"]))
+            if value is None or r["status"] != "completed":   # lap not completed: marked below
+                failed.append((d, r, s))
                 continue
             xs.append(d * 1000)
             ys.append(min(value, cap) if cap else value)
@@ -180,13 +185,20 @@ def plot_vs_delay(table: dict, metric: str, ylabel: str, name: str, title: str, 
             for (d, r) in pts:
                 if r[metric] is not None and r["cones_hit_geometric"]:
                     y = min(r[metric], cap) if cap else r[metric]
+                    left = sid == "app"            # keeps labels apart where two series meet
                     ax.annotate(f"{r['cones_hit_geometric']}", (d * 1000, y), textcoords="offset points",
-                                xytext=(7, 4), fontsize=8, color=MUTED)
+                                xytext=(-8, -12) if left else (7, 4), ha="right" if left else "left",
+                                fontsize=8, color=MUTED)
         if cap:
             for d, r in pts:
                 if r[metric] is not None and r[metric] > cap:
-                    ax.annotate(f"{r[metric]:.0f}", (d * 1000, cap), textcoords="offset points",
-                                xytext=(-4, 6), fontsize=8, color=MUTED, ha="right")
+                    ax.annotate(f"{r[metric]:.0f} s", (d * 1000, cap), textcoords="offset points",
+                                xytext=(8, -14), fontsize=8, color=MUTED, ha="left")
+    top = ax.get_ylim()[1]
+    for d, r, s in failed:                         # e.g. RAPP leaving the track at 0.20 s
+        ax.plot([d * 1000], [top], marker="X", color=s["color"], ms=9, ls="none", clip_on=False)
+        ax.annotate(r["status"].replace("_", " "), (d * 1000, top), textcoords="offset points",
+                    xytext=(-8, -4), ha="right", fontsize=8, color=MUTED)
     ax.axvline(DESIGN_DELAY_S * 1000, color=MUTED, lw=0.8, ls=(0, (2, 3)))
     ax.text(DESIGN_DELAY_S * 1000, ax.get_ylim()[0], " design delay (0.15 s)", color=MUTED, fontsize=8, va="bottom")
     ax.set_xlabel("Actuation delay (ms)", color=TEXT, fontsize=10)
@@ -215,6 +227,8 @@ def plot_robustness(table: dict) -> None:
     ax.grid(True, axis="x", color=GRID)
     ax.grid(False, axis="y")
     offsets = np.linspace(-0.22, 0.22, len(series))
+    x_max = 125.0                                  # one classic-PP run (862 s) would flatten the rest
+    ax.set_xlim(100.0, x_max)
     for k, sid in enumerate(series):
         s = SERIES[sid]
         for i, cond in enumerate(rows):
@@ -225,11 +239,18 @@ def plot_robustness(table: dict) -> None:
             if failed_value(r):
                 ax.text(ax.get_xlim()[0], y, f"  {s['short']}: {r['status']}", fontsize=8, color=MUTED, va="center")
                 continue
+            text = f"{r['fs_time_s']:.1f}" + (f" ({r['cones_hit_geometric']})" if r["cones_hit_geometric"] else "")
+            seen = ax.get_legend_handles_labels()[1].count(s["label"])
+            if r["fs_time_s"] > x_max:             # off the scale: arrow at the edge with the value
+                ax.plot([x_max - 0.3], [y], marker=">", color=s["color"], ms=8, ls="none",
+                        label=None if seen else s["label"])
+                ax.annotate(text + " off scale", (x_max - 0.3, y), textcoords="offset points",
+                            xytext=(-10, -3), ha="right", fontsize=8, color=MUTED)
+                continue
             ax.plot([r["fs_time_s"]], [y], marker=s["marker"], color=s["color"], ms=8,
                     markeredgecolor="white", markeredgewidth=1.0, ls="none",
-                    label=s["label"] if i == 0 or not ax.get_legend_handles_labels()[1].count(s["label"]) else None)
-            ax.annotate(f"{r['fs_time_s']:.1f}" + (f" ({r['cones_hit_geometric']})" if r["cones_hit_geometric"] else ""),
-                        (r["fs_time_s"], y), textcoords="offset points", xytext=(8, -3), fontsize=8, color=MUTED)
+                    label=None if seen else s["label"])
+            ax.annotate(text, (r["fs_time_s"], y), textcoords="offset points", xytext=(8, -3), fontsize=8, color=MUTED)
     ax.set_yticks(range(len(rows)))
     ax.set_yticklabels([labels[c] for c in rows], color=TEXT, fontsize=9)
     ax.invert_yaxis()
