@@ -11,6 +11,8 @@ Figures
   carla_error_vs_delay       95th-percentile tracking error against actuation delay
   carla_robustness           FS time at 0.15 s under wrong lookahead / wrong steering model
   carla_error_along_track    |tracking error| along the lap at 0.15 s, ours vs classic PP
+  carla_trails_overview      the whole track from above with each controller's driven path at 0.15 s
+  carla_trails_zoom          the same paths, zoomed into four corners, with the cones each one hit
 """
 
 from __future__ import annotations
@@ -292,6 +294,91 @@ def plot_error_along_track(table: dict) -> None:
     save(fig, "carla_error_along_track")
 
 
+# Corners to zoom into: (label, distance along the racing line in m).
+ZOOMS = [("A  fast kink", 137.0), ("B  hairpin", 176.0), ("C  tight left-hander", 591.0), ("D  last hairpin", 1048.0)]
+TRAIL_SERIES = ["pp_classic", "rpp_classic", "ours"]
+ZOOM_HALF_M = 14.0
+
+
+def lap_trail(r: dict) -> np.ndarray:
+    rows = list(csv.DictReader((r["dir"] / "run_log.csv").open()))
+    t_s = np.array([float(x["t_s"]) for x in rows])
+    s_m = np.array([float(x["s_m"]) for x in rows])
+    xy = np.array([[float(x["x_m"]), float(x["y_m"])] for x in rows])
+    keep = (t_s >= sb.IGNORE_BEFORE_S) & (s_m >= np.maximum.accumulate(s_m) - 50.0)
+    return xy[keep], rows
+
+
+def cones_hit(r: dict, cones: np.ndarray) -> np.ndarray:
+    xy, rows = lap_trail(r)
+    meta = json.loads((r["dir"] / "meta.json").read_text())
+    ext, off = meta.get("bbox_half_extent_m"), meta.get("bbox_center_offset_m")
+    yaw_all = np.array([float(x["yaw_rapp_rad"]) for x in rows])
+    t_all = np.array([float(x["t_s"]) for x in rows])
+    s_all = np.array([float(x["s_m"]) for x in rows])
+    keep = (t_all >= sb.IGNORE_BEFORE_S) & (s_all >= np.maximum.accumulate(s_all) - 50.0)
+    clearance = sb.cone_clearance(xy, yaw_all[keep], cones, ext[0], ext[1], off[0])
+    return cones[clearance.min(axis=0) <= 0.0]
+
+
+def plot_trails(table: dict) -> None:
+    runs = {sid: table.get((sid, "nominal", DESIGN_DELAY_S)) for sid in TRAIL_SERIES}
+    runs = {k: v for k, v in runs.items() if v is not None}
+    if not runs:
+        print("  (no 0.15 s runs; skipped trail figures)")
+        return
+    line = np.loadtxt(sb.RACELINE_PATH, delimiter=";", comments="#")
+    line_s, line_xy = line[:, 0], line[:, 1:3]
+    cones = sb.load_cones(sb.TRACK_WIDTH_M)
+    trails = {sid: lap_trail(r)[0] for sid, r in runs.items()}
+    hits = {sid: cones_hit(r, cones) for sid, r in runs.items()}
+
+    def draw(ax, lw):
+        ax.scatter(cones[:, 0], cones[:, 1], s=4 if lw < 1.5 else 14, color="#b4b2a9", zorder=1, linewidths=0)
+        ax.plot(line_xy[:, 0], line_xy[:, 1], color=MUTED, lw=0.8, ls=(0, (4, 3)), zorder=2, label="Racing line")
+        for sid, xy in trails.items():
+            s = SERIES[sid]
+            ax.plot(xy[:, 0], xy[:, 1], color=s["color"], lw=lw, ls=s["ls"], zorder=3,
+                    label=f"{s['short']} ({len(hits[sid])} cones)")
+            if len(hits[sid]):
+                ax.scatter(hits[sid][:, 0], hits[sid][:, 1], marker="x", s=40 if lw > 1.5 else 18,
+                           color=s["color"], linewidths=1.6, zorder=4)
+        ax.set_aspect("equal")
+        ax.set_xticks([]); ax.set_yticks([])
+        for side in ax.spines.values():
+            side.set_visible(False)
+
+    # Overview with the zoom boxes.
+    fig, ax = plt.subplots(figsize=(6.4, 6.4))
+    draw(ax, 1.0)
+    for label, s0 in ZOOMS:
+        cx, cy = line_xy[int(np.argmin(np.abs(line_s - s0)))]
+        ax.add_patch(plt.Rectangle((cx - ZOOM_HALF_M, cy - ZOOM_HALF_M), 2 * ZOOM_HALF_M, 2 * ZOOM_HALF_M,
+                                   fill=False, ec=TEXT, lw=0.8, zorder=5))
+        ax.text(cx - ZOOM_HALF_M, cy + ZOOM_HALF_M + 1.5, label.split()[0], fontsize=10, color=TEXT, zorder=5)
+    ax.set_title("Driven path of each controller at 0.15 s delay (x = cone hit)", color=TEXT, fontsize=11, loc="left")
+    ax.legend(frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.02), ncol=2, labelcolor=TEXT)
+    save(fig, "carla_trails_overview")
+
+    # Zoomed corners.
+    fig, axes = plt.subplots(2, 2, figsize=(7.2, 7.6))
+    for ax, (label, s0) in zip(axes.ravel(), ZOOMS):
+        draw(ax, 2.0)
+        cx, cy = line_xy[int(np.argmin(np.abs(line_s - s0)))]
+        ax.set_xlim(cx - ZOOM_HALF_M, cx + ZOOM_HALF_M)
+        ax.set_ylim(cy - ZOOM_HALF_M, cy + ZOOM_HALF_M)
+        ax.set_title(f"{label} (~{s0:.0f} m into the lap)", color=TEXT, fontsize=10, loc="left")
+        ax.plot([cx - ZOOM_HALF_M + 1, cx - ZOOM_HALF_M + 6], [cy - ZOOM_HALF_M + 1] * 2, color=TEXT, lw=1.5)
+        ax.text(cx - ZOOM_HALF_M + 3.5, cy - ZOOM_HALF_M + 1.6, "5 m", fontsize=8, color=TEXT, ha="center")
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, frameon=False, fontsize=8, loc="lower center", ncol=2, labelcolor=TEXT,
+               bbox_to_anchor=(0.5, -0.01))
+    fig.suptitle("Corners up close at 0.15 s delay (lines = car centre, the car is 2 m wide; x = cone hit)", color=TEXT, fontsize=11,
+                 x=0.02, ha="left")
+    fig.tight_layout(rect=(0, 0.06, 1, 0.97))
+    save(fig, "carla_trails_zoom")
+
+
 def write_tables(table: dict) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     keys = sorted(table, key=lambda k: (list(SERIES).index(k[0]), k[1] != "nominal", k[1], k[2]))
@@ -334,6 +421,7 @@ def main() -> None:
                   "Tracking error vs actuation delay")
     plot_robustness(table)
     plot_error_along_track(table)
+    plot_trails(table)
     write_tables(table)
 
 
