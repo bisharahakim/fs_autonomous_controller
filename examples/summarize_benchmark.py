@@ -116,6 +116,12 @@ def controller_label(meta: dict) -> str:
                 f"[{params.get('lookahead_min', '?')},{params.get('lookahead_max', '?')}]"
                 + ((" no-curv" if curv >= 50 else f" c={curv}") if curv != 1.0 else "")
                 + (f" tau={params['delay_comp_s']}" if params.get("delay_comp_s") else ""))
+    if name == "explore":
+        e = (meta.get("controller_params") or {}).get("perception", {})
+        tag = f" noise={e['noise_m']:g}" if e.get("noise_m") else ""
+        tag += f" miss={e['miss_prob']:g}" if e.get("miss_prob") else ""
+        seed = (meta.get("controller_params") or {}).get("kinorrt", {}).get("seed", 1)
+        return "explore kinorrt" + (f" seed={seed}" if seed != 1 else "") + tag
     if name == "pid":
         return f"pid {params.get('kp', '?')}/{params.get('ki', '?')}/{params.get('kd', '?')}"
     return name
@@ -180,7 +186,7 @@ def analyse(run_dir: Path, raceline_xy: np.ndarray, cones: np.ndarray, include_d
         label += " car=" + car.replace("audi_tt_carla_", "")
     if meta.get("grip_cap_mps2"):
         label += f" +grip{meta['grip_cap_mps2']:g}"
-    pfpp = meta_path.exists() and is_pfpp(meta)          # its additions are part of the name
+    pfpp = meta_path.exists() and (is_pfpp(meta) or meta.get("controller") == "explore")  # additions are in the name
     if meta.get("reference") == "rear" and not pfpp:
         label += " +rear"
     if meta.get("steer_map") == "calibrated" and not pfpp:

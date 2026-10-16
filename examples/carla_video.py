@@ -10,6 +10,10 @@ depend on CARLA's debug drawing being visible to cameras):
     red dot      lookahead target point, with a line from the car and the distance
     red ring     cone hit (flashes for a second, then stays marked)
     bottom bar   controller, delay, time, speed, tracking error, cones hit
+First lap (--controller explore), instead of the racing line:
+    grey lines   the KinoRRT search tree of the latest replan
+    green line   the chosen local plan
+    white rings  cones the detector sees in this frame; faint wedge = detection range
 
 Encoding: ffmpeg (H.264, plays in PowerPoint and browsers) if installed, otherwise
 OpenCV (mp4v), otherwise numbered PNG frames in a folder.
@@ -36,6 +40,8 @@ BAR_BG = (24, 24, 23)
 BAR_TEXT = (240, 239, 236)
 BAR_MUTED = (195, 194, 183)
 
+TREE = (205, 205, 205)
+SEEN = (255, 255, 255)
 FLASH_S = 1.0
 
 
@@ -173,8 +179,28 @@ class Overlay:
             px, ok = project(track_to_carla(np.asarray(xy, float), ground_z), cam_to_world, self.w, self.h, self.fov)
             return (float(px[0, 0]), float(px[0, 1])) if ok[0] else None
 
+        if scene.get("fov") is not None:
+            lines(scene["fov"], SEEN + (110,), max(1, self.lw - 2))
+        tree = scene.get("tree")
+        if tree:
+            stacked = np.concatenate(tree)
+            px, ok = project(track_to_carla(stacked, ground_z), cam_to_world, self.w, self.h, self.fov)
+            n = len(tree[0])
+            for k in range(len(tree)):
+                seg, good = px[k * n:(k + 1) * n], ok[k * n:(k + 1) * n]
+                if good.all():
+                    draw.line([tuple(q) for q in seg], fill=TREE + (150,), width=1)
         for piece in scene["line_runs"]:
             lines(piece, RACING_LINE + (230,), self.lw)
+        if scene.get("plan_xy") is not None:
+            lines(scene["plan_xy"], RACING_LINE + (240,), self.lw)
+        seen = scene.get("seen")
+        if seen is not None and len(seen):
+            px, ok = project(track_to_carla(np.asarray(seen, float), ground_z), cam_to_world, self.w, self.h, self.fov)
+            r = self.lw + 3
+            for (u, v_), good in zip(px, ok):
+                if good:
+                    draw.ellipse([u - r, v_ - r, u + r, v_ + r], outline=SEEN + (200,), width=2)
         lines(scene["trail_xy"], TRAIL + (255,), self.lw)
 
         car = point(scene["car_xy"])
@@ -212,15 +238,20 @@ def hud_bar(width: int, height: int, scene: dict) -> Image.Image:
     draw.text((20 + draw.textlength(scene["title"], font=big) + 18, y), scene["subtitle"], font=small, fill=BAR_MUTED)
     stats = (f"t {scene['t']:6.1f} s     v {scene['v']:5.1f} m/s ({scene['v'] * 3.6:5.1f} km/h)     "
              f"error {abs(scene['xte']):.2f} m     cones {len(scene['hits'])}")
+    if scene.get("extra"):
+        stats = f"{scene['extra']}     " + stats
     draw.text((width - draw.textlength(stats, font=small) - 20, y), stats, font=small,
               fill=HIT if scene["hits"] else BAR_TEXT)
     return bar
 
 
-def legend(img: Image.Image) -> None:
+def legend(img: Image.Image, explore: bool = False) -> None:
     draw = ImageDraw.Draw(img, "RGBA")
     font = _font(max(12, img.height // 40))
     items = [("racing line", RACING_LINE), ("driven path", TRAIL), ("target point", TARGET), ("cone hit", HIT)]
+    if explore:
+        items = [("plan", RACING_LINE), ("search tree", TREE), ("seen cone", SEEN), ("driven", TRAIL),
+                 ("target", TARGET), ("cone hit", HIT)]
     x, y = 14, img.height - 26
     total = sum(28 + int(draw.textlength(text, font=font)) + 22 for text, _ in items)
     draw.rounded_rectangle([x - 8, y - 8, x + total - 10, y + 20], radius=6, fill=(0, 0, 0, 150))
@@ -263,6 +294,7 @@ class LapRecorder:
         self.hits: dict[int, float] = {}               # cone index -> time it was hit
         self.t = 0.0
         self.last = None
+        self.explorer = None                           # set by the runner for --controller explore
 
         carla = self.carla
         lib = self.world.get_blueprint_library()
@@ -391,15 +423,34 @@ class LapRecorder:
             "hits": [(self.cones[i], t - t_hit) for i, t_hit in self.hits.items()],
             "title": self.title, "subtitle": self.subtitle, "t": t, "v": v, "xte": xte,
         }
+        if self.explorer is not None:
+            scene.update(self._explore_scene(x, y, yaw))
         ground = float(tf.location.z) + 0.05
         rgb_chase, rgb_top = self._to_rgb(img_chase), self._to_rgb(img_top)
         if self.lut is not None:
             rgb_chase, rgb_top = self.lut[rgb_chase], self.lut[rgb_top]
         chase = self.ov_chase.render(rgb_chase, self._matrix(img_chase), ground, scene)
         top = self.ov_top.render(rgb_top, self._matrix(img_top), ground, scene)
-        legend(top)
+        legend(top, explore=self.explorer is not None)
         self.last = (chase, top, scene)
         self.sink.write(compose(chase, top, hud_bar(2 * self.w, self.bar_h, scene)))
+
+    def _explore_scene(self, x: float, y: float, yaw: float) -> dict:
+        ex = self.explorer
+        per = ex.perception
+        c = per.config
+        sx, sy = x + c.sensor_forward_m * math.cos(yaw), y + c.sensor_forward_m * math.sin(yaw)
+        half = math.radians(c.fov_deg) / 2.0
+        arc = [(sx + c.range_m * math.cos(yaw + a), sy + c.range_m * math.sin(yaw + a))
+               for a in np.linspace(-half, half, 25)]
+        ms = ex.plan_ms[-1] if ex.plan_ms else 0.0
+        return {
+            "tree": ex.planner.tree_edges(),
+            "plan_xy": ex.path.xy() if ex.path is not None else None,
+            "seen": per.true_xy[per.visible_ids] if len(per.visible_ids) else None,
+            "fov": np.array([(sx, sy)] + arc + [(sx, sy)]),
+            "extra": f"plan {ms:4.0f} ms   map {len(per.map_xy):3d} cones",
+        }
 
     @staticmethod
     def _runs(line_xy: np.ndarray, near: np.ndarray) -> list[np.ndarray]:

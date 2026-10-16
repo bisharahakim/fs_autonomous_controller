@@ -1,0 +1,138 @@
+{
+  "controller": "explore",
+  "controller_params": {
+    "exploration": {
+      "v_max_mps": 5.0,
+      "ay_max_mps2": 3.0,
+      "decel_mps2": 2.0,
+      "kappa_rate": 0.8,
+      "emergency_decel_mps2": 5.0,
+      "replan_s": 0.2,
+      "commit_m": 1.0,
+      "rejoin_m": 0.4,
+      "rejoin_rad": 0.25,
+      "lookahead_gain_s": 0.45,
+      "lookahead_min_m": 3.5,
+      "lookahead_max_m": 6.0
+    },
+    "kinorrt": {
+      "iterations": 300,
+      "step_m": 1.0,
+      "check_every_m": 0.25,
+      "horizon_m": 15.0,
+      "min_radius_m": 2.2,
+      "dkappa_per_m": 0.25,
+      "margin_m": 0.3,
+      "margin_tight_m": 0.12,
+      "good_m": 6.0,
+      "clearance_ref_m": 1.0,
+      "support_m": 5.5,
+      "link_m": 6.0,
+      "w_clear": 0.4,
+      "w_dkappa": 0.15,
+      "w_kappa": 0.05,
+      "tries": 6,
+      "reuse_m": 5.0,
+      "smooth_m": 1.0,
+      "bias_mid": 0.75,
+      "seed": 1
+    },
+    "perception": {
+      "range_m": 15.0,
+      "fov_deg": 120.0,
+      "sensor_forward_m": 1.5,
+      "noise_m": 0.1,
+      "miss_prob": 0.2,
+      "merge_radius_m": 0.7,
+      "seed": 1
+    }
+  },
+  "velocity_pid": {
+    "kp": 0.5,
+    "ki": 0.05,
+    "kd": 0.0,
+    "kff_accel": 0.04,
+    "kff_brake": 0.0,
+    "integral_limit": 0.15,
+    "brake_gain": 0.12,
+    "max_throttle": 0.75,
+    "max_brake": 0.8
+  },
+  "speed_scale": 1.0,
+  "speed_ref": "lookahead",
+  "brake_decel": 8.0,
+  "delay_steps": 3,
+  "delay_s": 0.15,
+  "predict_delay": true,
+  "predict_model": "vehicle",
+  "steer_map": "calibrated",
+  "reference": "rear",
+  "feedforward": true,
+  "vehicle_params": {
+    "name": "audi_tt_carla",
+    "wheelbase_m": 2.51,
+    "length_m": 4.18,
+    "width_m": 1.99,
+    "legacy_max_steer_rad": 0.5,
+    "steering": {
+      "full_command_angle_rad": 0.574,
+      "speed_coeff_s2pm2": 0.0059
+    },
+    "ay_max_mps2": 8.5,
+    "min_turn_radius_m": 2.2,
+    "carla_blueprint": "vehicle.ue4.audi.tt"
+  },
+  "dt_s": 0.05,
+  "wheelbase_m": 2.51,
+  "max_steer_rad": 0.574,
+  "raceline": "hockenheim_fsg_first_lap.csv",
+  "track": "hockenheim_fsg",
+  "grip_cap_mps2": null,
+  "video": null,
+  "status": "completed",
+  "lap_time_s": 230.85000343993306,
+  "elapsed_s": 230.85,
+  "steps": 4617,
+  "max_abs_xte_m": 1.0514,
+  "git_commit": "e1af5e5-dirty",
+  "timestamp": "20261016_073522",
+  "sim_cones_hit": 0,
+  "sim_collision_events": 0,
+  "sim_collision_types": {},
+  "plant": "carla",
+  "client_version": "0.10.0",
+  "server_version": "0.10.0",
+  "vehicle": "vehicle.ue4.audi.tt",
+  "sync": true,
+  "wheel_max_steer_angle_deg": [
+    70.0,
+    70.0,
+    0.0,
+    0.0
+  ],
+  "bbox_half_extent_m": [
+    2.0906052589416504,
+    0.9970585703849792,
+    0.6926480531692505
+  ],
+  "bbox_center_offset_m": [
+    -0.000372390728443861,
+    -3.814697180359872e-08,
+    0.6926480531692505
+  ],
+  "collision_sensor": true,
+  "exploration": {
+    "replans": 1155,
+    "failed_replans": 5,
+    "plan_ms_mean": 63.22,
+    "plan_ms_p95": 82.05,
+    "plan_ms_max": 137.58,
+    "tight_margin_plans": 1,
+    "cones_mapped": 881,
+    "cones_seen_of_total": [
+      881,
+      882
+    ]
+  },
+  "max_time_s": 480.0
+}

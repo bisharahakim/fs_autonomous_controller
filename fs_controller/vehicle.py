@@ -57,8 +57,17 @@ class VehicleParams:
     steering: SteeringResponse
     # Lateral acceleration the planned speed may ask for (m/s^2). None = no limit.
     ay_max_mps2: float | None = None
+    # Tightest turn (rear-axle radius, m) a planner may use at low speed. None = from the
+    # steering response at walking speed (wheelbase / tan(full_command_angle_rad)).
+    min_turn_radius_m: float | None = None
     carla_blueprint: str | None = None
     notes: str = ""
+
+    def planner_min_radius_m(self) -> float:
+        if self.min_turn_radius_m is not None:
+            return self.min_turn_radius_m
+        import math
+        return self.wheelbase_m / math.tan(self.steering.full_command_angle_rad)
 
     def to_dict(self) -> dict:
         return {
@@ -67,6 +76,7 @@ class VehicleParams:
             "steering": {"full_command_angle_rad": self.steering.full_command_angle_rad,
                          "speed_coeff_s2pm2": self.steering.speed_coeff_s2pm2},
             "ay_max_mps2": self.ay_max_mps2,
+            "min_turn_radius_m": self.min_turn_radius_m,
             "carla_blueprint": self.carla_blueprint,
         }
 
@@ -88,6 +98,7 @@ def load_vehicle(name_or_path: str | Path) -> VehicleParams:
             speed_coeff_s2pm2=float(steering.get("speed_coeff_s2pm2", 0.0)),
         ),
         ay_max_mps2=(float(data["ay_max_mps2"]) if data.get("ay_max_mps2") is not None else None),
+        min_turn_radius_m=(float(data["min_turn_radius_m"]) if data.get("min_turn_radius_m") is not None else None),
         carla_blueprint=data.get("carla_blueprint"),
         notes=data.get("notes", ""),
     )

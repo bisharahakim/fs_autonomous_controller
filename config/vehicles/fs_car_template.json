@@ -10,5 +10,6 @@
     "speed_coeff_s2pm2": 0.0
   },
   "ay_max_mps2": null,
-  "notes": "TEMPLATE. Wheelbase from the pure-Python model; length, width and steering are placeholders. Fill full_command_angle_rad with the measured road-wheel angle at full steering command, and fit speed_coeff_s2pm2 from logged laps with scripts/identify_steering.py. Set ay_max_mps2 from skidpad data (typical FS car 12-15 m/s^2)."
+  "min_turn_radius_m": null,
+  "notes": "TEMPLATE. Wheelbase from the pure-Python model; length, width and steering are placeholders. Fill full_command_angle_rad with the measured road-wheel angle at full steering command, and fit speed_coeff_s2pm2 from logged laps with scripts/identify_steering.py. Set ay_max_mps2 from skidpad data (typical FS car 12-15 m/s^2). Set min_turn_radius_m (rear-axle radius at full lock, walking speed, plus a margin) for the first-lap planner; null = derived from the steering response."
 }

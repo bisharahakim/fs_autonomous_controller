@@ -10,5 +10,6 @@
     "speed_coeff_s2pm2": 0.0059
   },
   "ay_max_mps2": 8.5,
-  "notes": "Size from CARLA's bounding box. Steering identified from about 150 000 samples of benchmark laps (scripts/identify_steering.py): full command gives about 30 deg at 4 m/s and 11 deg at 18 m/s. CARLA lists a 70 deg front-wheel limit, but that is not what the car achieves while driving. Grip limit ay_max_mps2 = 8.5: the benchmark laps peak at about 9.5 m/s^2, but the car scrubs speed there; 8.5 leaves a margin."
+  "min_turn_radius_m": 2.2,
+  "notes": "Size from CARLA's bounding box. Steering identified from about 150 000 samples of benchmark laps (scripts/identify_steering.py): full command gives about 30 deg at 4 m/s and 11 deg at 18 m/s. CARLA lists a 70 deg front-wheel limit, but that is not what the car achieves while driving. Grip limit ay_max_mps2 = 8.5: the benchmark laps peak at about 9.5 m/s^2, but the car scrubs speed there; 8.5 leaves a margin. min_turn_radius_m = 2.2: tightest turn a path planner may use (rear-axle radius, low speed). Logged yaw rate at full command below 5 m/s gives a 2.4-2.7 m radius at the body centre (about 2.0-2.4 m at the rear axle; CARLA allows 70 deg at the wheels when slow), much tighter than the steering map implies. The FSG hairpin (5 m corridor) needs 1.9-2.5 m for a car this size."
 }

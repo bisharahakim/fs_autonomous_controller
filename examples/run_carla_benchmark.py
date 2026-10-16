@@ -46,6 +46,15 @@ from fs_controller.lateral import (  # noqa: E402
     RAPPLateral,
     signed_cross_track,
 )
+from fs_controller.exploration import (  # noqa: E402
+    CarGeometry,
+    ConePerception,
+    ExplorationConfig,
+    ExplorationLateral,
+    KinoRRT,
+    KinoRRTConfig,
+    PerceptionConfig,
+)
 from fs_controller.raceline import Raceline, load_raceline  # noqa: E402
 from fs_controller.rapp import RAPP, RAPPConfig  # noqa: E402
 from fs_controller.velocity_pid import VelocityPID, VelocityPIDConfig  # noqa: E402
@@ -383,8 +392,11 @@ class KinematicPlant:
     steering response (so it turns less at speed, like the CARLA car). Still not a
     vehicle-dynamics model: no slip angles, no load transfer. It proves the code path."""
 
-    def __init__(self, dt_s: float) -> None:
+    def __init__(self, dt_s: float, steering=None) -> None:
         self.dt_s = dt_s
+        # The plant's own steering response. Default: the controller's vehicle file. Another
+        # file (--plant-vehicle) tests what happens when the controller's model is wrong.
+        self.steering = steering
         self.info = {"plant": "kinematic", "vehicle": "kinematic bicycle", "sync": True}
         self._t = 0.0
 
@@ -409,7 +421,7 @@ class KinematicPlant:
     def step(self) -> None:
         dt = self.dt_s
         command, throttle, brake = self._cmd
-        steer_cmd = VEHICLE.steering.angle(command, self.v)
+        steer_cmd = (self.steering or VEHICLE.steering).angle(command, self.v)
         self.delta += (steer_cmd - self.delta) * dt / (0.05 + dt)  # steering lag
         accel = 4.5 * throttle - 9.0 * brake - 0.0035 * self.v * self.v - 0.1
         self.v = max(0.0, self.v + accel * dt)
@@ -520,7 +532,35 @@ def lookahead_overlay(raceline: Raceline, lat, controller) -> dict:
     }
 
 
+def build_explorer(args) -> ExplorationLateral:
+    """First lap without a known track: simulated cone perception -> KinoRRT -> PFPP tracking."""
+    import summarize_benchmark as sb
+
+    cones = sb.load_cones(sb.TRACK_WIDTH_M, args.track)   # left/right pairs: even = blue, odd = yellow
+    colours = np.arange(len(cones)) % 2
+    perception = ConePerception(cones, colours, PerceptionConfig(
+        range_m=args.explore_range, fov_deg=args.explore_fov, noise_m=args.explore_noise,
+        miss_prob=args.explore_miss, seed=args.explore_seed))
+    car = CarGeometry(
+        wheelbase_m=WHEELBASE_M, half_length_m=0.5 * VEHICLE.length_m, half_width_m=0.5 * VEHICLE.width_m,
+        body_centre_ahead_m=0.5 * WHEELBASE_M,       # rear axle -> body centre (the CARLA actor origin)
+    )
+    planner = KinoRRT(KinoRRTConfig(
+        iterations=args.explore_samples, horizon_m=min(args.explore_range, 15.0),
+        min_radius_m=args.explore_min_radius or VEHICLE.planner_min_radius_m(),
+        margin_m=args.explore_margin, seed=args.explore_seed), car)
+    return ExplorationLateral(
+        perception, planner,
+        ExplorationConfig(v_max_mps=args.explore_v_max, ay_max_mps2=args.explore_ay, replan_s=args.explore_replan,
+                          lookahead_min_m=args.rapp_lookahead_min, lookahead_max_m=args.rapp_lookahead_max,
+                          lookahead_gain_s=args.rapp_speed_gain),
+        wheelbase_m=WHEELBASE_M, max_steer_rad=MAX_STEER_RAD,
+    )
+
+
 def build_controller(args, raceline: Raceline):
+    if args.controller == "explore":
+        return build_explorer(args)
     if args.controller in ("rapp", "pfpp"):
         return RAPPLateral(
             raceline,
@@ -570,7 +610,9 @@ def git_commit() -> str:
 def video_title(args) -> tuple[str, str]:
     """Title and subtitle shown in the video's bottom bar."""
     extras = args.feedforward and args.predict_delay
-    if args.controller == "pfpp":
+    if args.controller == "explore":
+        title = "First lap: KinoRRT + PFPP"
+    elif args.controller == "pfpp":
         title = "PFPP (ours)"
     elif args.controller == "pp":
         title = (f"Pure pursuit {args.pp_lookahead:g} m" if not args.pp_gain else "Pure pursuit (speed-scaled)")
@@ -580,7 +622,9 @@ def video_title(args) -> tuple[str, str]:
     else:
         title = "Cross-track PID"
     subtitle = f"actuation delay {args.delay_steps * args.dt:.2f} s"
-    if "first_lap" in args.raceline.name:
+    if args.controller == "explore":
+        subtitle += f", track unknown, cones seen up to {args.explore_range:g} m, v <= {args.explore_v_max:g} m/s"
+    elif "first_lap" in args.raceline.name:
         subtitle += ", first-lap mode"
     if args.track != "hockenheim_fsg":
         subtitle += f", track: {args.track} (unseen)"
@@ -602,6 +646,8 @@ def make_recorder(args, plant, raceline: Raceline, out_dir: Path):
     title, subtitle = video_title(args)
     width, height = (int(v) for v in args.record_size.lower().split("x"))
     line_xy = np.column_stack((raceline.x_m, raceline.y_m))
+    if args.controller == "explore":
+        line_xy = np.zeros((0, 2))                     # the car does not know the track: draw its plan instead
     return LapRecorder(plant, path, title, subtitle, line_xy, sb.load_cones(sb.TRACK_WIDTH_M, args.track),
                        size=(width, height), fps=1.0 / args.dt, gamma=args.record_gamma)
 
@@ -609,6 +655,7 @@ def make_recorder(args, plant, raceline: Raceline, out_dir: Path):
 def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
     controller = build_controller(args, raceline)
     controller.reset()
+    explore = args.controller == "explore"
     velocity_pid = VelocityPID(
         VelocityPIDConfig(
             kp=args.speed_kp, ki=args.speed_ki, kd=args.speed_kd, max_throttle=args.max_throttle,
@@ -650,6 +697,8 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         **plant.info,
     }, indent=2))
     recorder = make_recorder(args, plant, raceline, out_dir) if args.record else None
+    if recorder and explore:
+        recorder.explorer = controller                 # draws the tree, the plan and the cone map
 
     total_points = len(raceline.s_m) - 1
     end_zone = int(0.85 * total_points)
@@ -677,6 +726,8 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
                 break
 
             x, y, yaw, v, yaw_carla_deg = plant.state()
+            if explore:
+                controller.observe(x, y, yaw)            # the detector sees from the true pose
             if args.predict_delay and pending:
                 px, py, pyaw = predict_pose(x, y, yaw, v, pending, dt)
                 lat = controller.compute(*reference_point(px, py, pyaw), pyaw, v, dt)
@@ -684,18 +735,25 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
                 actual_xte = signed_cross_track(raceline, x, y, actual_index)
             else:
                 lat = controller.compute(*reference_point(x, y, yaw), yaw, v, dt)
-                actual_index = lat.nearest_index if args.reference == "centre" else raceline.nearest_index(x, y)
-                actual_xte = lat.cross_track_m
+                if explore:
+                    actual_index = raceline.nearest_index(x, y)
+                    actual_xte = signed_cross_track(raceline, x, y, actual_index)
+                else:
+                    actual_index = lat.nearest_index if args.reference == "centre" else raceline.nearest_index(x, y)
+                    actual_xte = lat.cross_track_m
             s_actual = float(raceline.s_m[actual_index])
-            s_now = float(raceline.s_m[lat.nearest_index])
-            if args.speed_ref == "plan":
+            s_now = float(raceline.s_m[actual_index if explore else lat.nearest_index])
+            if explore:
+                target_speed, target_accel = controller.speed_target()
+            elif args.speed_ref == "plan":
                 ref = raceline.target_at_s(s_now)
             else:
                 ref, _ = speed_reference.speed_target(s_now, v)
-            target_speed = ref.v_target_mps * args.speed_scale
-            target_accel = ref.a_target_mps2 * args.speed_scale**2
+            if not explore:
+                target_speed = ref.v_target_mps * args.speed_scale
+                target_accel = ref.a_target_mps2 * args.speed_scale**2
             lon = velocity_pid.update(target_speed, target_accel, v, dt)
-            if args.draw:
+            if args.draw and not explore:
                 plant.draw_lookahead(lookahead_overlay(raceline, lat, controller))
             pending.append((lat.steering, lon.throttle, lon.brake))
             delta_cmd, throttle_cmd, brake_cmd = pending.popleft()
@@ -716,7 +774,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
 
             if step % int(round(1.0 / dt)) == 0:
                 print(
-                    f"t={t:6.2f}s | idx={lat.nearest_index:4d}/{total_points} | v={v:5.2f} "
+                    f"t={t:6.2f}s | idx={actual_index:4d}/{total_points} | v={v:5.2f} "
                     f"(ref {target_speed:5.2f}) | L={lat.lookahead_m:3.1f} m | xte={actual_xte:+.2f} m | "
                     f"steer={steer_norm:+.2f} thr={lon.throttle:.2f} brk={lon.brake:.2f}"
                 )
@@ -740,7 +798,8 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
             plant.step()
             step += 1
             if recorder:
-                recorder.capture(t + dt, v, actual_xte, (lat.target_x, lat.target_y), lat.lookahead_m)
+                recorder.capture(t + dt, v, lat.cross_track_m if explore else actual_xte,
+                                 (lat.target_x, lat.target_y), lat.lookahead_m)
 
     plant.mark_end()
     video = None
@@ -785,6 +844,14 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         **collisions,
         **plant.info,
     }
+    if explore:
+        meta["exploration"] = controller.stats()
+        meta["max_time_s"] = args.max_time
+        save_exploration(out_dir / "exploration.npz", controller)
+        st = meta["exploration"]
+        print(f"Exploration: {st['replans']} replans ({st['failed_replans']} kept the previous path), planning "
+              f"{st['plan_ms_mean']:.1f} ms mean / {st['plan_ms_p95']:.1f} ms 95% / {st['plan_ms_max']:.1f} ms max, "
+              f"{st['cones_mapped']} cones mapped")
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
     # Cones in this level have no collision, so the simulator cannot count contacts.
@@ -796,6 +863,24 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         print(f"RESULT [{args.controller}]: {status.upper()} at t={t:.1f} s "
               f"(max |xte| {max_abs_xte:.2f} m, {hit_text})")
     return meta
+
+
+def save_exploration(path: Path, explorer: ExplorationLateral) -> None:
+    """Cone map and every planned path, for the exploration figures (and a later race line)."""
+    paths = explorer.history or [np.zeros((0, 2), np.float32)]
+    np.savez_compressed(
+        path,
+        map_xy=explorer.perception.map_xy, map_col=explorer.perception.map_col,
+        ever_seen=explorer.perception.ever_seen,
+        plan_t=np.array(explorer.history_t), plan_ms=np.array(explorer.plan_ms),
+        replan_t=np.array(explorer.replan_t),
+        paths=np.concatenate(paths), path_start=np.cumsum([0] + [len(q) for q in paths])[:-1],
+        trees=np.concatenate(explorer.trees) if explorer.trees else np.zeros((0, 5), np.float32),
+        tree_start=np.cumsum([0] + [len(q) for q in explorer.trees])[:-1],
+        step_m=explorer.planner.c.step_m,
+        perception=np.array([explorer.perception.config.range_m, explorer.perception.config.fov_deg,
+                             explorer.perception.config.sensor_forward_m]),
+    )
 
 
 def restore_async(host: str, port: int) -> None:
@@ -813,23 +898,29 @@ def restore_async(host: str, port: int) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--controller", choices=("pfpp", "rapp", "pp", "pid"), default="rapp",
+    p.add_argument("--controller", choices=("pfpp", "explore", "rapp", "pp", "pid"), default="rapp",
                    help="pfpp = Predictive Feed-forward Pure Pursuit (ours): speed-scaled lookahead "
                         "(0.45 v in [3.5, 6] m), delay prediction, curvature feed-forward, measured "
-                        "steering map, rear-axle reference. The flags it switches on are set automatically.")
+                        "steering map, rear-axle reference. The flags it switches on are set automatically. "
+                        "explore = first lap on an unknown track: cone perception -> KinoRRT -> PFPP tracking "
+                        "(the --raceline is then only used to measure progress and error).")
     p.add_argument("--plant", choices=("carla", "kinematic"), default="carla")
     p.add_argument("--repeat", type=int, default=1, help="Number of consecutive laps (each from a fresh spawn).")
     p.add_argument("--speed-scale", type=float, default=1.0, help="Scale the raceline speed profile (1.0 = as planned).")
     p.add_argument("--dt", type=float, default=0.05, help="Fixed simulator timestep in seconds.")
     p.add_argument("--delay-steps", type=int, default=0,
                    help="Actuation delay in timesteps (3 = 0.15 s at the default dt). Same for every controller.")
-    p.add_argument("--max-time", type=float, default=240.0, help="Abort a lap after this much SIMULATOR time.")
+    p.add_argument("--max-time", type=float, default=None,
+                   help="Abort a lap after this much SIMULATOR time (default 240 s, 480 s for explore).")
     p.add_argument("--abort-xte", type=float, default=3.5, help="Abort when |cross-track error| exceeds this (m).")
     p.add_argument("--predict-delay", action="store_true",
                    help="Delay compensation: steer from the pose predicted through the pending commands. "
                         "Works with any controller.")
     p.add_argument("--predict-model", choices=("vehicle", "v14", "simple"), default="vehicle",
                    help="Steering model used by --predict-delay (see PREDICT_MODEL).")
+    p.add_argument("--plant-vehicle", default=None,
+                   help="Kinematic plant only: steering response of the simulated car from this vehicle file "
+                        "(default: same as --vehicle), to test a wrong steering model offline.")
     p.add_argument("--vehicle", default="audi_tt_carla",
                    help="Vehicle file: a name in config/vehicles/ or a path to a JSON file.")
     p.add_argument("--grip-cap", nargs="?", type=float, const=-1.0, default=None,
@@ -868,6 +959,19 @@ def main() -> None:
                    help="Lookahead <= this * corner radius. 1.0 = original RAPP.")
     g.add_argument("--rapp-delay-comp", type=float, default=RAPPConfig.delay_comp_s,
                    help="Actuation delay RAPP is designed for (s). Adds speed * delay to the lookahead.")
+    g = p.add_argument_group("exploration lap (--controller explore)")
+    g.add_argument("--explore-v-max", type=float, default=5.0, help="Speed cap on the first lap (m/s).")
+    g.add_argument("--explore-ay", type=float, default=3.0, help="Lateral acceleration the local speed plan allows.")
+    g.add_argument("--explore-range", type=float, default=15.0, help="Cone detection range (m).")
+    g.add_argument("--explore-fov", type=float, default=120.0, help="Cone detection field of view (deg).")
+    g.add_argument("--explore-noise", type=float, default=0.0, help="Std dev of detected cone positions (m).")
+    g.add_argument("--explore-miss", type=float, default=0.0, help="Probability a visible cone is missed per frame.")
+    g.add_argument("--explore-samples", type=int, default=300, help="KinoRRT samples per replan.")
+    g.add_argument("--explore-replan", type=float, default=0.2, help="Replanning period (s).")
+    g.add_argument("--explore-margin", type=float, default=0.30, help="Smallest car-to-cone gap a plan may have (m).")
+    g.add_argument("--explore-min-radius", type=float, default=None,
+                   help="Tightest turn the planner may use (m). Default: the vehicle file's min_turn_radius_m.")
+    g.add_argument("--explore-seed", type=int, default=1, help="Random seed (planner and perception).")
     g = p.add_argument_group("pure pursuit")
     g.add_argument("--pp-lookahead", type=float, default=PurePursuitLateralConfig.lookahead_m)
     g.add_argument("--pp-gain", type=float, default=PurePursuitLateralConfig.lookahead_gain_s)
@@ -897,6 +1001,19 @@ def main() -> None:
         args.feedforward = args.predict_delay = True
         if args.rapp_lookahead_min == RAPPConfig.lookahead_min:
             args.rapp_lookahead_min = 3.5
+    if args.controller == "explore":
+        # Tracking uses the PFPP machinery; the racing line is replaced by the planner's path.
+        args.reference, args.steer_map = "rear", "calibrated"
+        args.feedforward = args.predict_delay = True
+        if args.rapp_lookahead_min == RAPPConfig.lookahead_min:
+            args.rapp_lookahead_min = 3.5
+        if args.raceline == RACELINE_PATH:
+            args.raceline = PROJECT_ROOT / "inputs" / "racelines" / f"{args.track}_first_lap.csv"
+            if not args.raceline.exists():
+                raise SystemExit(f"{args.raceline} (used only to measure progress) is missing; make it with\n"
+                                 f"  python3 scripts/make_first_lap_line.py --track {args.track} --name {args.track}_first_lap")
+    if args.max_time is None:
+        args.max_time = 480.0 if args.controller == "explore" else 240.0
     global PREDICT_MODEL, VEHICLE, VEHICLE_BLUEPRINT, WHEELBASE_M, MAX_STEER_RAD, STEER_MAP, REFERENCE
     REFERENCE = args.reference
     PREDICT_MODEL = args.predict_model
@@ -934,7 +1051,7 @@ def main() -> None:
     if args.plant == "carla":
         plant = CarlaPlant(args.dt, sync=not args.no_sync, host=args.host, port=args.port, realtime=args.realtime)
     else:
-        plant = KinematicPlant(args.dt)
+        plant = KinematicPlant(args.dt, load_vehicle(args.plant_vehicle).steering if args.plant_vehicle else None)
 
     results = []
     try:
