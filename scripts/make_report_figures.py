@@ -10,6 +10,7 @@ Figures
   carla_fs_time_vs_delay     FS time (lap + 2 s per cone) against actuation delay
   carla_error_vs_delay       95th-percentile tracking error against actuation delay
   carla_robustness           FS time at 0.15 s under wrong lookahead / wrong steering model
+  carla_sensitivity          PFPP vs PFPP with a fixed 4 m lookahead: seconds lost per wrong setting
   carla_error_along_track    |tracking error| along the lap at 0.15 s, ours vs classic PP
   carla_trails_overview      the whole track from above with each controller's driven path at 0.15 s
   carla_trails_zoom          the same paths, zoomed into four corners, with the cones each one hit
@@ -47,8 +48,8 @@ DESIGN_DELAY_S = 0.15
 SERIES = {
     "ours": dict(label="PFPP (ours): predictive feed-forward pure pursuit",
                  short="PFPP (ours)", color="#2a78d6", marker="o", ls="-"),
-    "pp_pkg": dict(label="Pure pursuit 4 m + same additions",
-                   short="PP 4 m + additions", color="#eb6834", marker="s", ls="--"),
+    "pp_pkg": dict(label="PFPP with a fixed 4 m lookahead",
+                   short="PFPP fixed 4 m", color="#eb6834", marker="s", ls="--"),
     "pp_classic": dict(label="Classic pure pursuit 4 m",
                        short="Classic PP 4 m", color="#1baf7a", marker="^", ls="-."),
     "rpp_classic": dict(label="RAPP, team's adaptive RPP variant (no additions)",
@@ -390,6 +391,50 @@ def plot_trails(table: dict) -> None:
     save(fig, f"{PREFIX}_trails_zoom")
 
 
+def plot_sensitivity(table: dict) -> None:
+    """PFPP vs PFPP with a fixed 4 m lookahead: seconds lost per mistake, against its own normal run."""
+    pair = ["ours", "pp_pkg"]
+    names = {"ours": "PFPP (speed-scaled lookahead)", "pp_pkg": "PFPP with a fixed 4 m lookahead"}
+    rows = [
+        ("Delay 0.20 s instead of 0.15 s", "nominal", 0.20),
+        ("Lookahead set too short", "lookahead short", DESIGN_DELAY_S),
+        ("Lookahead set too long", "lookahead long", DESIGN_DELAY_S),
+        ("Steering model 20% too weak", "steer -20%", DESIGN_DELAY_S),
+        ("Steering model 20% too strong", "steer +20%", DESIGN_DELAY_S),
+    ]
+    base = {sid: table.get((sid, "nominal", DESIGN_DELAY_S)) for sid in pair}
+    if any(b is None or b["fs_time_s"] is None for b in base.values()):
+        print("  (missing nominal runs; skipped carla_sensitivity)")
+        return
+    rows = [r for r in rows if all((sid, r[1], r[2]) in table for sid in pair)]
+    fig, ax = plt.subplots(figsize=(6.6, 0.62 * len(rows) + 1.3))
+    style_axes(ax)
+    ax.grid(True, axis="x", color=GRID)
+    ax.grid(False, axis="y")
+    height = 0.36
+    for k, sid in enumerate(pair):
+        s = SERIES[sid]
+        for i, (label, cond, delay) in enumerate(rows):
+            r = table[(sid, cond, delay)]
+            cost = r["fs_time_s"] - base[sid]["fs_time_s"]
+            y = i + (k - 0.5) * height * 1.1
+            ax.barh(y, cost, height=height, color=s["color"], label=names[sid] if i == 0 else None)
+            note = f"{cost:+.1f} s" + (f"  ({r['cones_hit_geometric']} cone{'s' if r['cones_hit_geometric'] != 1 else ''})"
+                                       if r["cones_hit_geometric"] else "")
+            ax.annotate(note, (max(cost, 0.0), y), textcoords="offset points", xytext=(5, -3), fontsize=8, color=MUTED)
+    ax.axvline(0.0, color=MUTED, lw=0.8)
+    ax.set_yticks(range(len(rows)))
+    ax.set_yticklabels([r[0] for r in rows], color=TEXT, fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlabel("Seconds lost against its own normal run (lap + 2 s per cone)", color=TEXT, fontsize=10)
+    ax.set_title("What a wrong setting costs: speed-scaled vs fixed lookahead (Hockenheim)", color=TEXT,
+                 fontsize=11, loc="left")
+    ax.legend(frameon=False, fontsize=8, loc="lower right", labelcolor=TEXT)
+    xmax = max(table[(sid, c, d)]["fs_time_s"] - base[sid]["fs_time_s"] for sid in pair for _, c, d in rows)
+    ax.set_xlim(min(-1.0, ax.get_xlim()[0]), xmax * 1.35 + 1.0)
+    save(fig, f"{PREFIX}_sensitivity")
+
+
 def write_tables(table: dict) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     keys = sorted(table, key=lambda k: (list(SERIES).index(k[0]), k[1] != "nominal", k[1], k[2]))
@@ -445,6 +490,7 @@ def main() -> None:
     plot_vs_delay(table, "xte_p95_m", "95th-percentile tracking error (m)", "carla_error_vs_delay",
                   "Tracking error vs actuation delay")
     plot_robustness(table)
+    plot_sensitivity(table)
     plot_error_along_track(table)
     plot_trails(table)
     write_tables(table)
