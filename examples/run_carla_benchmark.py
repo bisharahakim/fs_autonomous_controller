@@ -567,6 +567,43 @@ def git_commit() -> str:
         return "unknown"
 
 
+def video_title(args) -> tuple[str, str]:
+    """Title and subtitle shown in the video's bottom bar."""
+    extras = args.feedforward and args.predict_delay
+    if args.controller == "pfpp":
+        title = "PFPP (ours)"
+    elif args.controller == "pp":
+        title = (f"Pure pursuit {args.pp_lookahead:g} m" if not args.pp_gain else "Pure pursuit (speed-scaled)")
+        title += " + additions" if extras else ""
+    elif args.controller == "rapp":
+        title = "RAPP" + (" + additions" if extras else "")
+    else:
+        title = "Cross-track PID"
+    subtitle = f"actuation delay {args.delay_steps * args.dt:.2f} s"
+    if "first_lap" in args.raceline.name:
+        subtitle += ", first-lap mode"
+    return title, subtitle
+
+
+def make_recorder(args, plant, raceline: Raceline, out_dir: Path):
+    from carla_video import LapRecorder
+    import summarize_benchmark as sb
+
+    if args.record == "auto":
+        path = PROJECT_ROOT / "outputs" / "videos" / f"{out_dir.name}.mp4"
+    else:
+        path = Path(args.record)
+        if path.suffix.lower() != ".mp4":
+            path = path / f"{out_dir.name}.mp4"
+        elif args.repeat > 1:
+            path = path.with_name(f"{path.stem}_{out_dir.name}.mp4")
+    title, subtitle = video_title(args)
+    width, height = (int(v) for v in args.record_size.lower().split("x"))
+    line_xy = np.column_stack((raceline.x_m, raceline.y_m))
+    return LapRecorder(plant, path, title, subtitle, line_xy, sb.load_cones(sb.TRACK_WIDTH_M),
+                       size=(width, height), fps=1.0 / args.dt, gamma=args.record_gamma)
+
+
 def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
     controller = build_controller(args, raceline)
     controller.reset()
@@ -610,6 +647,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "lap_time_s": None,
         **plant.info,
     }, indent=2))
+    recorder = make_recorder(args, plant, raceline, out_dir) if args.record else None
 
     total_points = len(raceline.s_m) - 1
     end_zone = int(0.85 * total_points)
@@ -695,10 +733,21 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
             else:
                 stuck_since = None
 
+            if recorder:
+                recorder.pre_tick()
             plant.step()
             step += 1
+            if recorder:
+                recorder.capture(t + dt, v, actual_xte, (lat.target_x, lat.target_y), lat.lookahead_m)
 
     plant.mark_end()
+    video = None
+    if recorder:
+        cones = len(recorder.hits)
+        result = (f"lap {lap_time:.2f} s, {cones} cone{'s' if cones != 1 else ''}"
+                  if status == "completed" else status.replace("_", " "))
+        video = recorder.finish(result)
+        print(f"Video written to {video}")
     plant.stop_vehicle(keep=args.keep_ego)
     collisions = plant.collision_summary()
 
@@ -722,6 +771,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "max_steer_rad": MAX_STEER_RAD,
         "raceline": args.raceline.name,
         "grip_cap_mps2": args.grip_cap,
+        "video": video,
         "status": status,
         "lap_time_s": lap_time,
         "elapsed_s": round(t, 3),
@@ -791,6 +841,12 @@ def main() -> None:
     p.add_argument("--no-sync", action="store_true", help="Do not switch CARLA to synchronous mode.")
     p.add_argument("--realtime", action="store_true", help="Pace synchronous ticks to wall-clock (for watching/recording).")
     p.add_argument("--keep-ego", action="store_true", help="Leave the car in the world after the run.")
+    p.add_argument("--record", nargs="?", const="auto", default=None,
+                   help="Record the lap as video: chase + top-down cameras with overlays (CARLA only). "
+                        "Bare flag: outputs/videos/<run>.mp4; or give a folder or an .mp4 path.")
+    p.add_argument("--record-size", default="960x540", help="Size of each camera view, WIDTHxHEIGHT.")
+    p.add_argument("--record-gamma", type=float, default=1.0,
+                   help="Brighten the camera image: below 1 lifts dark areas (e.g. 0.6). 1 = as rendered.")
     p.add_argument("--draw", action="store_true",
                    help="Draw the lookahead on the track (ribbon, metre marks, target, distance). Use with --realtime.")
     p.add_argument("--raceline", type=Path, default=RACELINE_PATH,
@@ -867,6 +923,8 @@ def main() -> None:
             args.grip_cap = VEHICLE.ay_max_mps2
         capped = apply_grip_cap(raceline, args.grip_cap)
         print(f"Grip cap {args.grip_cap:.1f} m/s^2: planned speed lowered at {capped} of {len(raceline.s_m) - 1} points.")
+    if args.record and args.plant != "carla":
+        raise SystemExit("--record needs the CARLA plant (the cameras live in the simulator).")
     if args.plant == "carla":
         plant = CarlaPlant(args.dt, sync=not args.no_sync, host=args.host, port=args.port, realtime=args.realtime)
     else:
