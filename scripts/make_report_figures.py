@@ -52,7 +52,7 @@ SERIES = {
                    short="PFPP fixed 4 m", color="#eb6834", marker="s", ls="--"),
     "pp_classic": dict(label="Classic pure pursuit 4 m",
                        short="Classic PP 4 m", color="#1baf7a", marker="^", ls="-."),
-    "rpp_classic": dict(label="RAPP, team's adaptive RPP variant (no additions)",
+    "rpp_classic": dict(label="RAPP: adaptive RPP from the first project phase (no additions)",
                         short="RAPP", color="#eda100", marker="D", ls=":"),
     "app": dict(label="APP: speed-scaled lookahead only (PFPP without the additions)",
                 short="APP", color="#e87ba4", marker="v", ls=(0, (1, 1))),
