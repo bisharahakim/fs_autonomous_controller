@@ -1,245 +1,141 @@
-# fs_autonomous_controller
+# PFPP: delay-robust path tracking for Formula Student Driverless
 
-`fs_autonomous_controller` is a small Python starting point for a Formula
-Student Driverless controller:
+This repository contains **Predictive Feed-forward Pure Pursuit (PFPP)**, a steering controller for the Technion Formula Student Driverless car, and the **CARLA benchmark** used to develop and evaluate it. It was built as an undergraduate final project at the Technion (Faculty of Electrical and Computer Engineering, CRML lab).
 
-- High-level lateral control: pure pursuit.
-- Low-level longitudinal control: PI speed control.
-- Synthetic FSD autocross track made from cones.
-- Python animation for watching the car move.
-- Static SVG graphs for inspecting controller behavior.
+In Formula Student Driverless the track is marked only by cones, and every cone the car knocks over adds 2 s to its time. A real car also reacts to a steering command only after a delay of roughly 0.1-0.3 s. Pure pursuit is simple and robust, but under such a delay it cuts corners and becomes unstable. PFPP keeps pure pursuit's geometry and adds four parts that remove those causes.
 
-The project name is `fs_autonomous_controller`. The reusable Python controller
-package inside the project is still named `fs_controller`.
+![FS time vs actuation delay](outputs/report_figures/carla_fs_time_vs_delay.png)
 
-## Quick Start
+## Results
 
-From the project folder:
+All laps were driven in CARLA 0.10.0 with an Audi TT on a 5 m wide cone corridor, scored as **FS time = lap time + 2 s per cone hit**. Every controller used the same car, racing line, speed plan, speed controller and actuation delay. The simulator is deterministic, so every lap reproduces exactly.
 
-```bash
-cd "/Users/bisharahakim/Documents/fs_autonomous_controller"
-```
+**FSG Hockenheim layout (1128 m), FS time in s (cones hit):**
 
-Run the moving Python animation:
+| Actuation delay | PFPP | PFPP, fixed 4 m lookahead | Classic pure pursuit 4 m | APP | RAPP |
+|---|---|---|---|---|---|
+| 0 s | **103.25 (0)** | 102.85 (0) | 117.50 (9) | 117.45 (9) | 107.60 (4) |
+| 0.10 s | **103.60 (0)** | 103.60 (0) | 116.45 (8) | 104.90 (2) | 107.10 (3) |
+| 0.15 s (design) | **104.10 (0)** | 104.05 (0) | 111.95 (4) | 120.65 (8) | 116.55 (5) |
+| 0.20 s | **104.75 (0)** | 106.75 (1) | 191.10 (37) | 126.05 (7) | left the track |
 
-```bash
-python3 visualization/cone_track_animation.py
-```
+- **PFPP is the only controller with no cone hit at every delay.**
+- **It does not depend on a well-chosen lookahead.** A wrong lookahead setting cost PFPP 0.6-1.7 s, against 5.4-9.7 s for the same controller with a fixed lookahead.
+- **It works on tracks it has not seen.** On two unseen tracks, driven at 0.15 s without retuning, PFPP hit 2 cones on each (Brands Hatch 62.5 s, Montreal 111.85 s), against 9-38 for the other controllers.
+- **It handles the first lap on an unknown track.** A kinodynamic RRT planner works only from the cones visible ahead (15 m, 120 deg) and PFPP tracks its plan. The lap was completed in 231.0 s without a cone hit, and also with noisy and missed detections (234.65 s, 0 cones).
+- **It is cheap.** The steering law costs about 47 us per step in Python.
 
-Generate the main static graph:
+Tables for every condition: [`outputs/report_figures/carla_results.md`](outputs/report_figures/carla_results.md), [`carla_brandshatch_results.md`](outputs/report_figures/carla_brandshatch_results.md), [`carla_montreal_results.md`](outputs/report_figures/carla_montreal_results.md), [`carla_firstlap_results.md`](outputs/report_figures/carla_firstlap_results.md).
 
-```bash
-python3 visualization/static_controller_graph.py
-```
+## How PFPP works
 
-Open the generated graph:
+PFPP is pure pursuit with four additions. All of them are in [`fs_controller/lateral.py`](fs_controller/lateral.py), [`fs_controller/rapp.py`](fs_controller/rapp.py) and [`examples/run_carla_benchmark.py`](examples/run_carla_benchmark.py).
 
-```text
-outputs/controller_static_graph.svg
-```
+1. **Delay prediction.** The commands already sent but not yet applied are known. The pose is advanced through them with a kinematic bicycle model and the steering map, then moved to the rear axle. The controller steers from where the car will be when its command takes effect.
+2. **Speed-scaled lookahead.** `L = clamp(0.45 * v, 3.5 m, 6 m)`, shortened to the radius of a tight corner ahead.
+3. **Curvature feed-forward.** Pure pursuit's curvature contains a "chord" part that acts even when the car is exactly on the path. It turns the car in early at every corner entry and exit, which is the corner cutting. PFPP removes that part exactly and adds the path's own curvature:
+   ```
+   kappa_cmd = kappa_line + (kappa_pp - kappa_chord)
+   ```
+   `kappa_chord` is pure pursuit's command from the on-path pose, so the correction is zero when the car is on the line.
+4. **Steering map.** The desired wheel angle is converted into an actuator command at every speed with `u = delta * (1 + c v^2) / A`, the form of the steady-state understeer relation. `A` and `c` are fitted from ordinary driving logs by [`scripts/identify_steering.py`](scripts/identify_steering.py). For the Audi, A = 0.574 rad and c = 0.0059 s^2/m^2.
 
-Generate the controller comparison graph:
+Why the delay matters: for small errors, pure pursuit with an actuation delay `tau` is stable only while `v * tau / L < 0.52`, i.e. while the car travels less than about half the lookahead during the delay. With pure pursuit alone, a lookahead long enough for stability cuts corners. Prediction removes the delay, and the feed-forward removes the corner cutting, so the lookahead no longer has to do both.
 
-```bash
-python3 examples/compare_controller_settings.py
-```
+Everything car-specific (wheelbase, size, steering map, grip limit, tightest turn) is in one vehicle file in [`config/vehicles/`](config/vehicles/). Moving the controller to the Formula Student car means filling in [`fs_car_template.json`](config/vehicles/fs_car_template.json), not changing code.
 
-Open:
+## Repository layout
 
-```text
-outputs/controller_settings_comparison.svg
-```
+| Path | Contents |
+|---|---|
+| `fs_controller/` | Controller package. **Used in CARLA:** `lateral.py` (pure pursuit, PFPP feed-forward, cross-track PID), `rapp.py` (lookahead law and braking-envelope speed target), `raceline.py`, `velocity_pid.py`, `vehicle.py`, `exploration.py` (first lap: cone perception, KinoRRT, tracking). The other modules (`powertrain.py`, `tire_grip.py`, `speed_planner.py`, `controller_stack.py`, `pure_pursuit.py`, `low_level.py`) belong to the earlier pure-Python simulation of the FS car and are not used by the CARLA benchmark. |
+| `examples/run_carla_benchmark.py` | The benchmark runner: one lap per call, any controller, any delay, CARLA or an offline kinematic plant |
+| `examples/summarize_benchmark.py` | Cone hits (from the logged path and the car's bounding box), FS time and tracking error for every run |
+| `examples/spawn_hockenheim_cones_wide.py` | Spawns the cone corridor in CARLA |
+| `examples/carla_video.py` | Chase and top-down video recording with overlays |
+| `scripts/` | Batch scripts for every experiment, figure scripts, steering identification, track importer |
+| `config/vehicles/` | Vehicle files: the Audi TT, two deliberately wrong steering models for the robustness test, and a template for the FS car |
+| `inputs/racelines/`, `inputs/tracks/` | Racing lines and track centrelines (Hockenheim, Brands Hatch, Montreal) |
+| `outputs/report_figures/` | Report figures and result tables |
+| `outputs/carla/` | Logs of every CARLA run (`run_log.csv` and `meta.json` per lap) |
+| `visualization/` | Track geometry and the pure-Python visualizations |
+| `docs/` | `CARLA_INTEGRATION.md` (early integration notes, partly outdated) and the commit map of the 2026-10-16 history rewrite |
 
-Compare regular pure pursuit against adaptive pure pursuit:
+## Getting started
 
-```bash
-python3 examples/compare_pure_pursuit.py
-```
+Requirements: Python 3.10+, `numpy`, `scipy`, `matplotlib`, `Pillow`; for CARLA runs the CARLA 0.10.0 Python wheel (from `PythonAPI/dist/` of the CARLA install); `ffmpeg` for video (optional); `trajectory_planning_helpers` only for re-optimizing racing lines (`scripts/optimize_raceline.py`).
 
-Open:
+### Without CARLA
 
-```text
-outputs/pure_pursuit_comparison.svg
-```
-
-## What Each File Does
-
-```text
-fs_controller/pure_pursuit.py
-```
-
-Pure pursuit steering controller. It receives the vehicle state and a path, then
-outputs a steering angle.
-
-```text
-fs_controller/low_level.py
-```
-
-PI speed controller. It compares target speed against actual speed, then outputs
-normalized throttle and brake.
-
-```text
-fs_controller/controller_stack.py
-```
-
-Combines pure pursuit and PI into one controller call.
-
-```text
-visualization/autocross_track.py
-```
-
-Creates the synthetic FSD autocross track and assigns target speeds using a
-simple curvature-based speed planner. Straights can request up to about
-90 km/h, while tight corners slow toward about 27-40 km/h.
-
-```text
-visualization/cone_track_animation.py
-```
-
-Best file to run when you want to see something moving. It opens a Tkinter
-window with the cone track, car, pure pursuit target, live values, and a small
-rolling graph.
-
-```text
-visualization/static_controller_graph.py
-```
-
-Runs one full simulation and saves a static SVG graph showing trajectory, speed,
-tracking error, steering, throttle/brake, and lookahead.
-
-```text
-examples/simulate_controller.py
-```
-
-Terminal-only smoke test. It proves the controller stack imports and runs, but
-it only prints numbers. You are not supposed to see a visual graph from this one.
-
-```text
-examples/compare_controller_settings.py
-```
-
-Visual example. It runs the same autocross track with multiple controller
-settings and saves a comparison SVG. This is the useful example for seeing how
-different lookahead and PI gains affect the path.
-
-```text
-examples/compare_pure_pursuit.py
-```
-
-Analytical comparison of regular fixed-lookahead pure pursuit and adaptive
-speed-based pure pursuit. It saves a readable SVG with trajectory, tracking
-error, lookahead, steering, speed tracking, and summary metrics.
-
-## What You Should See
-
-When you run:
+A lap with an offline kinematic bicycle model. It checks the code path without the simulator; it is not a vehicle-dynamics simulation, so its lap times are not comparable with CARLA's.
 
 ```bash
-python3 visualization/cone_track_animation.py
+python3 examples/run_carla_benchmark.py --controller pfpp --plant kinematic \
+    --delay-steps 3 --speed-ref envelope --grip-cap
 ```
 
-You should see a window with:
+### In CARLA
 
-- orange and blue cones
-- a white car
-- a green pure pursuit target point
-- live speed, target speed, steering, and lookahead values
-- a small rolling graph
+1. Start CARLA (it opens the `FSD_Empty_Asphalt` level):
+   ```bash
+   pkill -f CarlaUnreal; ./CarlaUnreal.sh        # from the CARLA folder
+   ```
+2. Spawn the cones:
+   ```bash
+   python3 examples/spawn_hockenheim_cones_wide.py --keep --flip-y --width 5.0 --z 0.0
+   ```
+   Add `--clear --track brandshatch` (or `montreal`) for another track.
+3. Drive a lap (0.15 s delay = 3 steps of 0.05 s):
+   ```bash
+   python3 examples/run_carla_benchmark.py --controller pfpp --delay-steps 3 --speed-ref envelope --grip-cap
+   ```
+   Other controllers: `--controller pp --pp-lookahead 4` (classic pure pursuit), `--controller rapp` (RAPP). Add `--record --record-gamma 0.6` for a video.
+4. Score the runs:
+   ```bash
+   python3 examples/summarize_benchmark.py
+   ```
 
-When you run:
+If a script is killed while CARLA is in synchronous mode, the simulator waits for ticks; release it with `python3 examples/run_carla_benchmark.py --restore-async`.
 
-```bash
-python3 visualization/static_controller_graph.py
-```
+### Reproducing the results
 
-You should get:
+| Experiment | Command |
+|---|---|
+| Delay sweep and baselines | `bash scripts/final_batch.sh` |
+| Robustness (lookahead, wrong steering model) | `bash scripts/robustness_batch.sh` |
+| Unseen tracks | `bash scripts/unseen_track_batch.sh brandshatch`, `bash scripts/unseen_track_batch.sh montreal` |
+| First lap on an unknown track | `bash scripts/first_lap_batch.sh` |
+| Figures and tables | `python3 scripts/make_report_figures.py` (add `--track <name> --raceline inputs/racelines/<name>_audi_5m.csv` for the unseen tracks); `python3 scripts/make_exploration_figures.py` |
 
-```text
-outputs/controller_static_graph.svg
-```
+### Moving to another car
 
-This graph shows one controller setup in detail.
+1. Copy `config/vehicles/fs_car_template.json` and fill in the wheelbase, size, grip limit and tightest turn radius.
+2. Drive a few laps and fit the steering map: `python3 scripts/identify_steering.py <run folders>`. Put the printed `full_command_angle_rad` (A) and `speed_coeff_s2pm2` (c) into the file.
+3. Run with `--vehicle <name>`.
 
-When you run:
+If the steering model is uncertain, overestimate the car's steering strength. In the robustness test a model 20% too strong cost nothing, while one 20% too weak (the controller over-steers) cost 6.7 s.
 
-```bash
-python3 examples/compare_controller_settings.py
-```
+## Project history
 
-You should get:
+1. **Pure-Python simulation.** Vehicle model ported from the team's lap-time model, a minimum-curvature racing line for the FSG Hockenheim layout, and RAPP, an adaptive regulated pure pursuit written in this project, which drove a clean 101 s lap. Before this project the team had no path-tracking controller.
+2. **CARLA.** The same layout as a cone corridor in CARLA, a fair benchmark runner, and an adjustable actuation delay. Under delay RAPP did not beat plain pure pursuit, and changing the lookahead did not remove the cone hits.
+3. **PFPP.** An analysis of why pure-pursuit-type controllers hit cones under delay, and a controller that removes those causes. It was then tested for robustness, on unseen tracks and on a realistic first lap.
 
-```text
-outputs/controller_settings_comparison.svg
-```
+## Limitations
 
-This graph compares:
+- The car is CARLA's Audi TT, not the Formula Student car (about 2 m wide instead of about 1.5 m).
+- The Hockenheim racing line was planned with the FS car model. Its speed is capped to the Audi's grip; the unseen-track lines were planned for the Audi.
+- The unseen tracks are scaled F1TENTH track shapes ([f1tenth_racetracks](https://github.com/f1tenth/f1tenth_racetracks), GPL-3.0), not real FS layouts.
+- On the first lap, localization and cone colours are perfect; no SLAM runs in the loop.
+- Cones in the CARLA level have no collision, so hits are computed from the logged path and the car's bounding box.
 
-- baseline tuning
-- shorter lookahead
-- longer lookahead
-- more aggressive PI gains
+## Next steps
 
-Use this one to understand why tuning matters.
+- Identify the steering map, delay and grip limit on the real car.
+- Add a large-angle term to the steering map. PFPP's remaining cone hits on the unseen tracks are in the tightest hairpins, where the map is least accurate.
+- Feed the first-lap cone map (or a SLAM map) into the racing-line optimizer: explore → map → optimize → race.
+- Run PFPP as a ROS 2 node with the team's perception and SLAM.
 
-## Controller Loop
+## Author
 
-At each control tick:
-
-1. Read vehicle state: `x`, `y`, `yaw`, and `speed`.
-2. Provide a path made of `PathPoint(x, y, speed)` values.
-3. Call `ControllerStack.update(state, path, dt_s)`.
-4. Send `steering_rad`, `throttle`, and `brake` to your vehicle interface.
-
-Example:
-
-```python
-from fs_controller import ControllerStack, ControllerStackConfig
-from fs_controller import PIConfig, PurePursuitConfig, VehicleState, PathPoint
-
-controller = ControllerStack(
-    ControllerStackConfig(
-        pure_pursuit=PurePursuitConfig(wheelbase_m=1.55),
-        speed_pi=PIConfig(
-            kp=0.35,
-            ki=0.12,
-            output_min=-1.0,
-            output_max=1.0,
-            integrator_min=-3.0,
-            integrator_max=3.0,
-        ),
-    )
-)
-
-path = [
-    PathPoint(0.0, 0.0, 4.0),
-    PathPoint(5.0, 0.5, 5.0),
-    PathPoint(10.0, 2.0, 5.0),
-]
-
-state = VehicleState(x=0.0, y=0.0, yaw=0.0, speed=0.0)
-command = controller.update(state, path, dt_s=0.02)
-```
-
-## Tuning Notes
-
-Pure pursuit:
-
-- Increase lookahead for smoother steering.
-- Decrease lookahead if the car cuts corners or reacts too late.
-- Too much lookahead can make the car miss tight turns.
-- Too little lookahead can make steering twitchy.
-
-PI speed controller:
-
-- Higher `kp` reacts faster to speed error.
-- Higher `ki` removes long-term speed error.
-- Too much `kp` or `ki` can cause brake/throttle oscillation.
-- Normalized throttle/brake values in this simulation are not real actuator
-  commands yet.
-
-## Real Car Safety
-
-Before driving a real vehicle, add independent checks for emergency stop,
-command timeout, steering/speed limits, sensor validity, actuator feedback, and
-state-estimation confidence. This code is a controller starting point, not a
-complete safety system.
+Bishara Hakim, Technion Formula Student Driverless (autonomous team lead).
