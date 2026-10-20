@@ -652,6 +652,11 @@ def make_recorder(args, plant, raceline: Raceline, out_dir: Path):
                        size=(width, height), fps=1.0 / args.dt, gamma=args.record_gamma)
 
 
+def assumed_predict_steps(args) -> int:
+    """Delay (in steps) the predictor assumes: --predict-steps, or the true delay by default."""
+    return args.delay_steps if args.predict_steps is None else args.predict_steps
+
+
 def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
     controller = build_controller(args, raceline)
     controller.reset()
@@ -692,6 +697,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "speed_ref": args.speed_ref,
         "delay_s": round(args.delay_steps * args.dt, 4),
         "predict_delay": bool(args.predict_delay),
+        "predict_steps": assumed_predict_steps(args) if args.predict_delay else None,
         "status": "interrupted",
         "lap_time_s": None,
         **plant.info,
@@ -712,6 +718,10 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
     dt = args.dt
     # Actuation delay: the command applied now is the one computed delay_steps ago.
     pending = collections.deque([(0.0, 0.0, 0.0)] * args.delay_steps)
+    # The delay the predictor ASSUMES (--predict-steps). It replays the commands it sent in the
+    # last predict_n steps. With predict_n == delay_steps these are exactly the pending commands.
+    predict_n = assumed_predict_steps(args)
+    sent = collections.deque([(0.0, 0.0, 0.0)] * max(predict_n, 1), maxlen=max(predict_n, 1))
     t0 = plant.sim_time()
     step = 0
     print(f"\n[{args.controller}] run {run_index + 1}/{args.repeat} -> {log_path}")
@@ -728,8 +738,8 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
             x, y, yaw, v, yaw_carla_deg = plant.state()
             if explore:
                 controller.observe(x, y, yaw)            # the detector sees from the true pose
-            if args.predict_delay and pending:
-                px, py, pyaw = predict_pose(x, y, yaw, v, pending, dt)
+            if args.predict_delay and predict_n > 0:
+                px, py, pyaw = predict_pose(x, y, yaw, v, list(sent)[-predict_n:], dt)
                 lat = controller.compute(*reference_point(px, py, pyaw), pyaw, v, dt)
                 actual_index = raceline.nearest_index(x, y)
                 actual_xte = signed_cross_track(raceline, x, y, actual_index)
@@ -756,6 +766,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
             if args.draw and not explore:
                 plant.draw_lookahead(lookahead_overlay(raceline, lat, controller))
             pending.append((lat.steering, lon.throttle, lon.brake))
+            sent.append((lat.steering, lon.throttle, lon.brake))
             delta_cmd, throttle_cmd, brake_cmd = pending.popleft()
             steer_norm = plant.apply(steering_command(delta_cmd, v), throttle_cmd, brake_cmd)
 
@@ -823,6 +834,8 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "delay_s": round(args.delay_steps * dt, 4),
         "predict_delay": bool(args.predict_delay),
         "predict_model": args.predict_model if args.predict_delay else None,
+        "predict_steps": predict_n if args.predict_delay else None,
+        "predict_delay_assumed_s": round(predict_n * dt, 4) if args.predict_delay else None,
         "steer_map": STEER_MAP,
         "reference": REFERENCE,
         "feedforward": bool(args.feedforward),
@@ -916,6 +929,9 @@ def main() -> None:
     p.add_argument("--predict-delay", action="store_true",
                    help="Delay compensation: steer from the pose predicted through the pending commands. "
                         "Works with any controller.")
+    p.add_argument("--predict-steps", type=int, default=None,
+                   help="Delay (in steps) the predictor ASSUMES, to test a wrong delay estimate. "
+                        "Default: the true delay (--delay-steps). 0 = no prediction.")
     p.add_argument("--predict-model", choices=("vehicle", "v14", "simple"), default="vehicle",
                    help="Steering model used by --predict-delay (see PREDICT_MODEL).")
     p.add_argument("--plant-vehicle", default=None,

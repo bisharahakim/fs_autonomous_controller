@@ -90,9 +90,16 @@ def classify(m: dict) -> tuple[str, str] | None:
     ctrl = m.get("controller")
     params = m.get("controller_params") or {}
     vehicle = car(m)
+    # Wrong delay estimate (--predict-steps): the predictor assumed another delay than the true one.
+    assumed = m.get("predict_steps")
+    wrong_delay = bool(m.get("predict_delay")) and assumed is not None and assumed != m.get("delay_steps")
     if ctrl in ("rapp", "pfpp"):
         gain, lmin, lmax, curv = rapp_params(m)
         if has_package(m) and lmin == 3.5 and lmax == 6.0 and curv == 1.0:
+            if wrong_delay:
+                if vehicle != "audi_tt_carla" or gain != 0.45:
+                    return None
+                return "ours", f"assumes {assumed * float(m.get('dt_s', 0.05)):.2f} s"
             if vehicle != "audi_tt_carla":
                 return "ours", "steer " + vehicle.split("steer_")[-1].replace("minus", "-").replace("plus", "+") + "%"
             return "ours", {0.45: "nominal", 0.30: "lookahead short", 0.60: "lookahead long"}.get(gain, f"g={gain}")
@@ -100,6 +107,8 @@ def classify(m: dict) -> tuple[str, str] | None:
             return "rpp_classic", "nominal"
         if no_package(m) and (gain, lmin, lmax, curv) == (0.45, 3.5, 6.0, 1.0) and vehicle == "audi_tt_carla":
             return "app", "nominal"
+        return None
+    if wrong_delay:
         return None
     if ctrl == "pp" and not params.get("lookahead_gain_s"):
         length = params.get("lookahead_m")
