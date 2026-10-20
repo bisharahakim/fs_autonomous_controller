@@ -83,6 +83,17 @@ def rapp_params(m: dict) -> tuple:
 
 
 def classify(m: dict) -> tuple[str, str] | None:
+    """As _classify, plus runs whose throttle and brake had a different delay from the steering."""
+    key = _classify(m)
+    drive = m.get("drive_delay_steps")
+    if key is None or drive is None or drive == m.get("delay_steps"):
+        return key
+    if key[1] != "nominal":
+        return None
+    return key[0], f"drive delay {drive * float(m.get('dt_s', 0.05)):.2f} s"
+
+
+def _classify(m: dict) -> tuple[str, str] | None:
     """(series, condition) for a run, or None when it is not part of the report set.
 
     condition is 'nominal' or one of the robustness variations.

@@ -652,6 +652,11 @@ def make_recorder(args, plant, raceline: Raceline, out_dir: Path):
                        size=(width, height), fps=1.0 / args.dt, gamma=args.record_gamma)
 
 
+def drive_delay_steps(args) -> int:
+    """Delay (in steps) of throttle and brake: --drive-delay-steps, or the steering delay by default."""
+    return args.delay_steps if args.drive_delay_steps is None else args.drive_delay_steps
+
+
 def assumed_predict_steps(args) -> int:
     """Delay (in steps) the predictor assumes: --predict-steps, or the true delay by default."""
     return args.delay_steps if args.predict_steps is None else args.predict_steps
@@ -696,6 +701,7 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "speed_scale": args.speed_scale,
         "speed_ref": args.speed_ref,
         "delay_s": round(args.delay_steps * args.dt, 4),
+        "drive_delay_steps": drive_delay_steps(args),
         "predict_delay": bool(args.predict_delay),
         "predict_steps": assumed_predict_steps(args) if args.predict_delay else None,
         "status": "interrupted",
@@ -718,6 +724,10 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
     dt = args.dt
     # Actuation delay: the command applied now is the one computed delay_steps ago.
     pending = collections.deque([(0.0, 0.0, 0.0)] * args.delay_steps)
+    # Throttle and brake may have their own, longer delay (--drive-delay-steps): a drive motor and
+    # brakes often react later than the steering. Default: the same delay as the steering.
+    drive_n = drive_delay_steps(args)
+    drive_pending = collections.deque([(0.0, 0.0)] * drive_n)
     # The delay the predictor ASSUMES (--predict-steps). It replays the commands it sent in the
     # last predict_n steps. With predict_n == delay_steps these are exactly the pending commands.
     predict_n = assumed_predict_steps(args)
@@ -767,7 +777,9 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
                 plant.draw_lookahead(lookahead_overlay(raceline, lat, controller))
             pending.append((lat.steering, lon.throttle, lon.brake))
             sent.append((lat.steering, lon.throttle, lon.brake))
-            delta_cmd, throttle_cmd, brake_cmd = pending.popleft()
+            delta_cmd, _, _ = pending.popleft()
+            drive_pending.append((lon.throttle, lon.brake))
+            throttle_cmd, brake_cmd = drive_pending.popleft()
             steer_norm = plant.apply(steering_command(delta_cmd, v), throttle_cmd, brake_cmd)
 
             if actual_index > end_zone:
@@ -832,6 +844,8 @@ def run_once(args, plant, raceline: Raceline, run_index: int) -> dict:
         "brake_decel": args.brake_decel,
         "delay_steps": args.delay_steps,
         "delay_s": round(args.delay_steps * dt, 4),
+        "drive_delay_steps": drive_n,
+        "drive_delay_s": round(drive_n * dt, 4),
         "predict_delay": bool(args.predict_delay),
         "predict_model": args.predict_model if args.predict_delay else None,
         "predict_steps": predict_n if args.predict_delay else None,
@@ -929,6 +943,9 @@ def main() -> None:
     p.add_argument("--predict-delay", action="store_true",
                    help="Delay compensation: steer from the pose predicted through the pending commands. "
                         "Works with any controller.")
+    p.add_argument("--drive-delay-steps", type=int, default=None,
+                   help="Delay of throttle and brake in timesteps, if different from the steering delay "
+                        "(--delay-steps then applies to the steering only). Default: the same.")
     p.add_argument("--predict-steps", type=int, default=None,
                    help="Delay (in steps) the predictor ASSUMES, to test a wrong delay estimate. "
                         "Default: the true delay (--delay-steps). 0 = no prediction.")
